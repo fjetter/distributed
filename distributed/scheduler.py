@@ -46,6 +46,7 @@ from .utils_perf import enable_gc_diagnosis, disable_gc_diagnosis
 
 from .publish import PublishExtension
 from .queues import QueueExtension
+from .semaphore import SemaphoreExtension
 from .recreate_exceptions import ReplayExceptionScheduler
 from .lock import LockExtension
 from .pubsub import PubSubSchedulerExtension
@@ -69,6 +70,7 @@ DEFAULT_EXTENSIONS = [
     QueueExtension,
     VariableExtension,
     PubSubSchedulerExtension,
+    SemaphoreExtension,
 ]
 
 if dask.config.get('distributed.scheduler.work-stealing'):
