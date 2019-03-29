@@ -429,7 +429,6 @@ class Worker(ServerNode):
         self.name = name
         self.scheduler_delay = 0
         self.stream_comms = dict()
-        self.heartbeat_active = False
         self._ipython_kernel = None
 
         if self.local_dir not in sys.path:
@@ -467,6 +466,7 @@ class Worker(ServerNode):
             'release-task': partial(self.release_key, report=False),
             'delete-data': self.delete_data,
             'steal-request': self.steal_request,
+            'heartbeat-response': self.heartbeat_response,
         }
 
         super(Worker, self).__init__(
@@ -629,30 +629,22 @@ class Worker(ServerNode):
 
     @gen.coroutine
     def heartbeat(self):
-        if not self.heartbeat_active:
-            self.heartbeat_active = True
-            logger.debug("Heartbeat: %s" % self.address)
-            try:
-                start = time()
-                response = yield self.scheduler.heartbeat_worker(
-                    address=self.contact_address,
-                    now=time(),
-                    metrics=self.get_metrics()
-                )
-                end = time()
-                middle = (start + end) / 2
+        logger.debug("Heartbeat: %s" % self.address)
+        msg = {
+            "op": "heartbeat-worker",
+            "start": time(),
+            "metrics": self.get_metrics(),
+        }
+        self.batched_stream.send(msg)
 
-                if response['status'] == 'missing':
-                    yield self._register_with_scheduler()
-                    return
-                self.scheduler_delay = response['time'] - middle
-                self.periodic_callbacks['heartbeat'].callback_time = response['heartbeat-interval'] * 1000
-            except CommClosedError:
-                logger.warning("Heartbeat to scheduler failed")
-            finally:
-                self.heartbeat_active = False
-        else:
-            logger.debug("Heartbeat skipped: channel busy")
+    @gen.coroutine
+    def heartbeat_response(self, status, start=None, time=None, heartbeat_interval=None):
+        if status == 'missing':
+            yield self._register_with_scheduler()
+            return
+        avg = (start + time) / 2
+        self.scheduler_delay = time - avg
+        self.periodic_callbacks['heartbeat'].callback_time = heartbeat_interval * 1000
 
     @gen.coroutine
     def handle_scheduler(self, comm):
