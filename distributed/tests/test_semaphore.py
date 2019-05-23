@@ -12,7 +12,7 @@ from distributed.utils_test import (  # noqa
     gen_cluster,
     loop,
 )
-
+from tornado import gen
 from distributed import Client
 
 
@@ -117,6 +117,9 @@ def test_release_semaphore_after_timeout(c, s, a, b):
         with Client(s.address, asynchronous=True, name="ClientB") as clientB:
             semB = Semaphore(name="x", max_leases=2, client=clientB)
             semYB = Semaphore(name="y", client=clientB)
+
+            # Wait for the client to be properly registered at the scheduler
+            yield gen.sleep(0.1)
 
             assert (yield semB.acquire())
             assert (yield semYB.acquire())

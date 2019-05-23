@@ -9,11 +9,14 @@ import tornado.locks
 import tornado.queues
 from tornado import gen
 
-from .client import Client, _get_global_client
+from .client import _get_global_client
 from .utils import PeriodicCallback, log_errors, parse_timedelta
-from .worker import get_client, get_worker
+from .worker import get_worker
 from toolz.dicttoolz import valmap
 from .metrics import time
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class _Watch(object):
@@ -70,7 +73,7 @@ class SemaphoreExtension(object):
 
     @gen.coroutine
     def create(
-        self, stream=None, name=None, client=None, timeout=None, max_leases=None
+        self, comm=None, name=None, client=None, timeout=None, max_leases=None
     ):
         if name not in self.leases:
             assert isinstance(max_leases, int), max_leases
@@ -84,22 +87,20 @@ class SemaphoreExtension(object):
 
     @gen.coroutine
     def _get_lease(self, client, name, identifier):
-        # We should make sure that the client is already properly registered with the scheduler
-        # otherwise the lease validation will mop up every acquired release immediately
-        while client not in self.scheduler.clients:
-            yield
-        with (yield self.locks[name].acquire()):
+        if client not in self.scheduler.clients:
+            logger.warning("Client not known {}. Cannot acquire lease." % client)
+            result = False
+        elif len(self.leases[name]) < self.max_leases[name]:
             result = True
-            if len(self.leases[name]) < self.max_leases[name]:
-                self.leases[name].append(identifier)
-                self.leases_per_client[client][name].append(identifier)
-            else:
-                result = False
-            raise gen.Return(result)
+            self.leases[name].append(identifier)
+            self.leases_per_client[client][name].append(identifier)
+        else:
+            result = False
+        raise gen.Return(result)
 
     @gen.coroutine
     def acquire(
-        self, stream=None, name=None, client=None, timeout=None, identifier=None
+        self, comm=None, name=None, client=None, timeout=None, identifier=None
     ):
         with log_errors():
             if isinstance(name, list):
@@ -133,7 +134,7 @@ class SemaphoreExtension(object):
                 raise gen.Return(result)
 
     @gen.coroutine
-    def release(self, stream=None, name=None, client=None, identifier=None):
+    def release(self, comm=None, name=None, client=None, identifier=None):
         with log_errors():
             if isinstance(name, list):
                 name = tuple(name)
@@ -146,10 +147,9 @@ class SemaphoreExtension(object):
 
     @gen.coroutine
     def _release_value(self, name, client, identifier):
-        with (yield self.locks[name].acquire()):
-            self.leases_per_client[client][name].remove(identifier)
-            self.leases[name].remove(identifier)
-            self.events[name].set()
+        self.leases_per_client[client][name].remove(identifier)
+        self.leases[name].remove(identifier)
+        self.events[name].set()
 
     def _release_client(self, client):
         semaphore_names = list(self.leases_per_client[client])
@@ -250,15 +250,11 @@ class Semaphore(object):
         yield self.release()
 
     def __getstate__(self):
-        return (self.name, self.client.scheduler.address, self.max_leases)
+        return (self.name, self.max_leases)
 
     def __setstate__(self, state):
-        name, address, max_leases = state
-        try:
-            client = get_client(address)
-        except (AttributeError, AssertionError):
-            client = Client(address, set_as_default=False)
-        self.__init__(name=name, client=client, max_leases=max_leases)
+        name, max_leases = state
+        self.__init__(name=name, max_leases=max_leases)
 
     def close(self):
         self.client.sync(self.client.scheduler.semaphore_close, name=self.name)
