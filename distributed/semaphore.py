@@ -210,6 +210,12 @@ class Semaphore(object):
         If the internal counter is greater than zero, decrement it by one and return True immediately.
         If it is zero, wait until a release() is called and return True.
         """
+        while self.client.status == "connecting":
+            import time
+            time.sleep(0.1)
+        client_status = self.client.status
+        if not client_status == "running":
+            raise RuntimeError(f"Client not running but {client_status}")
         return self.client.sync(
             self.client.scheduler.semaphore_acquire,
             name=self.name,
