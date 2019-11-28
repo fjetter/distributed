@@ -152,6 +152,7 @@ class TCP(Comm):
         self._finalizer.atexit = False
         self._extra = {}
 
+        stream.set_close_callback(lambda: None)
         stream.set_nodelay(True)
         set_tcp_timeout(stream)
         self._read_extra()

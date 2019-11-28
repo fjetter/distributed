@@ -43,7 +43,7 @@ from .client import default_client, _global_clients, Client
 from .compatibility import WINDOWS
 from .comm import Comm
 from .config import initialize_logging
-from .core import connect, rpc, CommClosedError
+from .core import connect, rpc, CommClosedError, ConnectionPool
 from .deploy import SpecCluster
 from .metrics import time
 from .process import _cleanup_dangling
@@ -1560,3 +1560,44 @@ def cleanup():
                     logging.getLogger(name).setLevel(level)
 
                 yield
+
+
+class BrokenConnectionPool(ConnectionPool):
+    def __init__(self, *args, failing_connections=0, **kwargs):
+        self.cnn_count = 0
+        self.failing_connections = failing_connections
+        super(BrokenConnectionPool, self).__init__(*args, **kwargs)
+
+    async def connect(self, addr, *args, **kwargs):
+        self.cnn_count += 1
+        comm = await super(BrokenConnectionPool, self).connect(addr, *args, **kwargs)
+
+        async def raise_exc(self, *args, **kwargs):
+            raise EnvironmentError
+
+        if self.cnn_count <= self.failing_connections:
+            comm.read = raise_exc
+            comm.write = raise_exc
+
+        return comm
+
+
+class FlakyConnectionPool(ConnectionPool):
+    def __init__(self, *args, failure_rate=0.8, **kwargs):
+        self.failure_rate = failure_rate
+        super(FlakyConnectionPool, self).__init__(*args, **kwargs)
+
+    async def connect(self, addr, *args, **kwargs):
+        comm = await super(FlakyConnectionPool, self).connect(addr, *args, **kwargs)
+
+        async def raise_exc(self, *args, **kwargs):
+            raise EnvironmentError
+
+        import random
+
+        if random.random() <= self.failure_rate:
+            comm.read = raise_exc
+            comm.write = raise_exc
+
+        self._created.add(comm)
+        return comm

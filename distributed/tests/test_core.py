@@ -36,6 +36,7 @@ from distributed.utils_test import (
     captured_logger,
     inc,
     throws,
+    FlakyConnectionPool,
 )
 from distributed.utils_test import loop  # noqa F401
 
@@ -576,6 +577,7 @@ async def test_connection_pool_respects_limit():
 
     async def do_ping(pool, port):
         assert pool.open <= limit
+        pool.validate()
         await pool(ip="127.0.0.1", port=port).ping()
         assert pool.open <= limit
 
@@ -613,6 +615,54 @@ async def test_connection_pool_tls():
     assert rpc.active == 0
 
     rpc.close()
+
+
+@pytest.mark.asyncio
+async def test_connection_pool_respects_limit_flaky():
+
+    limit = 5
+
+    async def ping(comm, delay=0.01):
+        await asyncio.sleep(delay)
+        return "pong"
+
+    async def do_ping(pool, port):
+        while True:
+            pool.validate()
+            try:
+                return await pool(ip="127.0.0.1", port=port).ping()
+            except EnvironmentError:
+                pass
+
+    servers = [Server({"ping": ping}) for i in range(10)]
+    for server in servers:
+        await server.listen(0)
+
+    pool = FlakyConnectionPool()
+    futs = [do_ping(pool, s.port) for s in servers] * 1000
+    res = await asyncio.gather(*futs)
+    assert list(set(res)) == ["pong"]
+
+
+@pytest.mark.asyncio
+async def test_connection_pool_timeout():
+
+    limit = 5
+
+    async def ping(comm, delay=0.01):
+        await asyncio.sleep(delay)
+        return "pong"
+
+    server = Server({"ping": ping})
+    await server.listen(0)
+    pool = ConnectionPool(limit=5, timeout="1ms")
+    rpc = pool(server.address)
+
+    with pytest.raises(IOError, match="Timed out trying to connect to"):
+        await rpc.ping()
+    pool = ConnectionPool(limit=5, timeout="100ms")
+    rpc = pool(server.address)
+    await rpc.ping()
 
 
 @pytest.mark.asyncio
