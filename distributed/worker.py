@@ -1474,7 +1474,7 @@ class Worker(ServerNode):
             if not self.who_has.get(dep):
                 if dep not in self._missing_dep_flight:
                     self._missing_dep_flight.add(dep)
-                    self.loop.add_callback(self.handle_missing_dep, dep)
+                    # self.loop.add_callback(self.handle_missing_dep, dep)
             for key in self.dependents.get(dep, ()):
                 if self.task_state[key] == "waiting":
                     if remove:  # try a new worker immediately
@@ -1761,7 +1761,7 @@ class Worker(ServerNode):
                     }
                     for dep in missing_deps2:
                         self._missing_dep_flight.add(dep)
-                    self.loop.add_callback(self.handle_missing_dep, *missing_deps2)
+                    # self.loop.add_callback(self.handle_missing_dep, *missing_deps2)
 
                     deps = [dep for dep in deps if dep not in missing_deps]
 
@@ -2015,7 +2015,6 @@ class Worker(ServerNode):
 
                 if not busy:
                     self.repetitively_busy = 0
-                    self.ensure_communicating()
                 else:
                     # Exponential backoff to avoid hammering scheduler/worker
                     self.repetitively_busy += 1
@@ -2023,7 +2022,7 @@ class Worker(ServerNode):
 
                     # See if anyone new has the data
                     await self.query_who_has(dep)
-                    self.ensure_communicating()
+                self.ensure_communicating()
 
     def bad_dep(self, dep):
         exc = ValueError("Could not find dependent %s.  Check worker logs" % str(dep))
@@ -2034,60 +2033,60 @@ class Worker(ServerNode):
             self.transition(key, "error")
         self.release_dep(dep)
 
-    async def handle_missing_dep(self, *deps, **kwargs):
-        original_deps = list(deps)
-        self.log.append(("handle-missing", deps))
-        try:
-            deps = {dep for dep in deps if dep in self.dependents}
-            if not deps:
-                return
+    # async def handle_missing_dep(self, *deps, **kwargs):
+    #     original_deps = list(deps)
+    #     self.log.append(("handle-missing", deps))
+    #     try:
+    #         deps = {dep for dep in deps if dep in self.dependents}
+    #         if not deps:
+    #             return
 
-            for dep in list(deps):
-                suspicious = self.suspicious_deps[dep]
-                if suspicious > 5:
-                    deps.remove(dep)
-                    self.bad_dep(dep)
-            if not deps:
-                return
+    #         for dep in list(deps):
+    #             suspicious = self.suspicious_deps[dep]
+    #             if suspicious > 5:
+    #                 deps.remove(dep)
+    #                 self.bad_dep(dep)
+    #         if not deps:
+    #             return
 
-            for dep in deps:
-                logger.info(
-                    "Dependent not found: %s %s .  Asking scheduler",
-                    dep,
-                    self.suspicious_deps[dep],
-                )
+    #         for dep in deps:
+    #             logger.info(
+    #                 "Dependent not found: %s %s .  Asking scheduler",
+    #                 dep,
+    #                 self.suspicious_deps[dep],
+    #             )
 
-            who_has = await retry_operation(self.scheduler.who_has, keys=list(deps))
-            who_has = {k: v for k, v in who_has.items() if v}
-            self.update_who_has(who_has)
-            for dep in deps:
-                self.suspicious_deps[dep] += 1
+    #         who_has = await retry_operation(self.scheduler.who_has, keys=list(deps))
+    #         who_has = {k: v for k, v in who_has.items() if v}
+    #         self.update_who_has(who_has)
+    #         for dep in deps:
+    #             self.suspicious_deps[dep] += 1
 
-                if not who_has.get(dep):
-                    self.log.append((dep, "no workers found", self.dependents.get(dep)))
-                    self.release_dep(dep)
-                else:
-                    self.log.append((dep, "new workers found"))
-                    for key in self.dependents.get(dep, ()):
-                        if key in self.waiting_for_data:
-                            self.data_needed.append(key)
+    #             if not who_has.get(dep):
+    #                 self.log.append((dep, "no workers found", self.dependents.get(dep)))
+    #                 self.release_dep(dep)
+    #             else:
+    #                 self.log.append((dep, "new workers found"))
+    #                 for key in self.dependents.get(dep, ()):
+    #                     if key in self.waiting_for_data:
+    #                         self.data_needed.append(key)
 
-        except Exception:
-            logger.error("Handle missing dep failed, retrying", exc_info=True)
-            retries = kwargs.get("retries", 5)
-            self.log.append(("handle-missing-failed", retries, deps))
-            if retries > 0:
-                await self.handle_missing_dep(self, *deps, retries=retries - 1)
-            else:
-                raise
-        finally:
-            try:
-                for dep in original_deps:
-                    self._missing_dep_flight.remove(dep)
-            except KeyError:
-                pass
+    #     except Exception:
+    #         logger.error("Handle missing dep failed, retrying", exc_info=True)
+    #         retries = kwargs.get("retries", 5)
+    #         self.log.append(("handle-missing-failed", retries, deps))
+    #         if retries > 0:
+    #             await self.handle_missing_dep(self, *deps, retries=retries - 1)
+    #         else:
+    #             raise
+    #     finally:
+    #         try:
+    #             for dep in original_deps:
+    #                 self._missing_dep_flight.remove(dep)
+    #         except KeyError:
+    #             pass
 
-            self.ensure_communicating()
+    #         self.ensure_communicating()
 
     async def query_who_has(self, *deps):
         with log_errors():
