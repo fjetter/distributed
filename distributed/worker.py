@@ -1739,6 +1739,7 @@ class Worker(ServerNode):
                 changed
                 and self.data_needed
                 and len(self.in_flight_workers) < self.total_out_connections
+                and not self.paused
             ):
                 changed = False
                 logger.debug(
