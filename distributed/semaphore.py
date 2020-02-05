@@ -59,7 +59,9 @@ class SemaphoreExtension(object):
                 "semaphore_release": self.release,
             }
         )
-
+        # TODO: Hierarchy of semaphores / Nested -> Required or simply a "Known shortcomings"?
+        # TODO: Reentrant locks -> also not supported
+        # TODO: Do we detect this
         self.scheduler.extensions["semaphores"] = self
         self.pc_validate_leases = PeriodicCallback(
             self._validate_leases,
@@ -72,11 +74,11 @@ class SemaphoreExtension(object):
         self._validation_running = False
 
     @gen.coroutine
-    def create(
-        self, comm=None, name=None, client=None, timeout=None, max_leases=None
-    ):
+    def create(self, comm=None, name=None, client=None, timeout=None, max_leases=None):
+        # TODO: alternative: via config?
         if name not in self.leases:
             assert isinstance(max_leases, int), max_leases
+            # name = exasol / postgres / exa_core
             self.max_leases[name] = max_leases
         else:
             if max_leases != self.max_leases[name]:
@@ -100,7 +102,13 @@ class SemaphoreExtension(object):
 
     @gen.coroutine
     def acquire(
-        self, comm=None, name=None, client=None, timeout=None, identifier=None
+        # TODO: clearer names
+        self,
+        comm=None,
+        name=None,
+        client=None,
+        timeout=None,
+        identifier=None,
     ):
         with log_errors():
             if isinstance(name, list):
@@ -114,6 +122,15 @@ class SemaphoreExtension(object):
                 self.events[name].clear()
                 future = self._get_lease(client, name, identifier)
                 if timeout is not None:
+                    # TODO: Check if the gen.with_timeout actually cancels the
+                    #  coroutine -> check for the asyncio call. Need the *abort*
+                    # TODO: Client doesn't receive the result=True response but
+                    # scheduler continuously receives the heartbeat, i.e. lease
+                    # is never invalidated but client thinks he didn't get a
+                    # release
+                    # TODO: timeout of request vs timeout of semaphore.
+                    # Requests should not be open for too long, e.g. acquire
+                    # timeout very small but client side retries
                     future = gen.with_timeout(w.leftover(), future)
                 try:
                     result = yield future
@@ -147,6 +164,8 @@ class SemaphoreExtension(object):
 
     @gen.coroutine
     def _release_value(self, name, client, identifier):
+        # TODO: What if thhe client/identifier already released?
+        # TODO: No detection for "too many semaphores" acuired (e.g. can a client come back from the dead??)
         self.leases_per_client[client][name].remove(identifier)
         self.leases[name].remove(identifier)
         self.events[name].set()
@@ -162,24 +181,20 @@ class SemaphoreExtension(object):
 
     @gen.coroutine
     def _validate_leases(self):
-        if not self._validation_running:
-            self._validation_running = True
-            known_clients = set(self.leases_per_client.keys())
-            scheduler_clients = set(self.scheduler.clients.keys())
-            for client in known_clients - scheduler_clients:
-                client_has_leases = sum(
-                    valmap(len, self.leases_per_client[client]).values()
-                )
-                if client_has_leases:
-                    self._release_client(client)
-            else:
-                self._validation_running = False
+        known_clients = set(self.leases_per_client.keys())
+        scheduler_clients = set(self.scheduler.clients.keys())
+        for client in known_clients - scheduler_clients:
+            client_has_leases = sum(
+                valmap(len, self.leases_per_client[client]).values()
+            )
+            if client_has_leases:
+                self._release_client(client)
 
 
 class Semaphore(object):
     def __init__(self, max_leases=1, name=None, client=None):
         self.client = client or _get_global_client() or get_worker().client
-        self.id = uuid.uuid4().hex
+        self.id = uuid.uuid4().hex  # TODO: is this needed
         self.name = name or "semaphore-" + uuid.uuid4().hex
         self.max_leases = max_leases
 
@@ -212,6 +227,7 @@ class Semaphore(object):
         """
         while self.client.status == "connecting":
             import time
+
             time.sleep(0.1)
         client_status = self.client.status
         if not client_status == "running":
