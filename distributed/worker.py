@@ -575,6 +575,7 @@ class Worker(ServerNode):
         self.scheduler_delay = 0
         self.stream_comms = dict()
         self.heartbeat_active = False
+        self.memory_monitor_active = False
         self._ipython_kernel = None
 
         if self.local_directory not in sys.path:
@@ -618,6 +619,7 @@ class Worker(ServerNode):
 
         stream_handlers = {
             "close": self.close,
+            "prepare_retirement": self.prepare_retirement,
             "compute-task": self.add_task,
             "release-task": partial(self.release_key, report=False),
             "delete-data": self.delete_data,
@@ -1091,6 +1093,15 @@ class Worker(ServerNode):
     def _close(self, *args, **kwargs):
         warnings.warn("Worker._close has moved to Worker.close", stacklevel=2)
         return self.close(*args, **kwargs)
+
+    async def prepare_retirement(self):
+        self.periodic_callbacks["memory"].stop()
+        # Memory monitor may have toggled this on again. Wait for the monitor to
+        # finish and set it to paused
+        self.paused = True
+        while self.memory_monitor_active:
+            await asyncio.sleep(0)
+            self.paused = True
 
     async def close(
         self, report=True, timeout=10, nanny=True, executor_wait=True, safe=False
@@ -1777,6 +1788,7 @@ class Worker(ServerNode):
                 changed
                 and self.data_needed
                 and len(self.in_flight_workers) < self.total_out_connections
+                and not self.paused
             ):
                 changed = False
                 logger.debug(
@@ -2616,9 +2628,9 @@ class Worker(ServerNode):
 
         If we rise above 80% memory use, stop execution of new tasks
         """
-        if self._memory_monitoring:
+        if self.memory_monitor_active:
             return
-        self._memory_monitoring = True
+        self.memory_monitor_active = True
         total = 0
 
         proc = self.monitor.proc
@@ -2653,6 +2665,7 @@ class Worker(ServerNode):
                     else "None",
                 )
                 self.paused = False
+                self.ensure_communicating()
                 self.ensure_computing()
 
         check_pause(memory)
@@ -2697,7 +2710,7 @@ class Worker(ServerNode):
                     # before trying to evict even more data.
                     self._throttled_gc.collect()
                     memory = proc.memory_info().rss
-            check_pause(memory)
+                check_pause(memory)
             if count:
                 logger.debug(
                     "Moved %d pieces of data data and %s to disk",
@@ -2705,7 +2718,7 @@ class Worker(ServerNode):
                     format_bytes(total),
                 )
 
-        self._memory_monitoring = False
+        self.memory_monitor_active = False
         return total
 
     def cycle_profile(self):
