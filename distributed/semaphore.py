@@ -237,6 +237,11 @@ class Semaphore:
     client: Client (optional)
         Client to use for communication with the scheduler.  If not given, the
         default global client will be used.
+    max_request_timeout:
+        Never wait longer than this amount of time for the scheduler to answer
+        the request. If the acquisition timeout is higher than this value,
+        perform multiple tries to acquire with each a timeout of this length
+        until the total time runs out.
 
     Examples
     --------
@@ -272,7 +277,7 @@ class Semaphore:
 
     """
 
-    def __init__(self, max_leases=1, name=None, client=None):
+    def __init__(self, max_leases=1, name=None, client=None, max_request_timeout=None):
         # NOTE: the `id` of the `Semaphore` instance will always be unique, even among different
         # instances for the same resource. The actual attribute that identifies a specific resource is `name`,
         # which will be the same for all instances of this class which limit the same resource.
@@ -280,18 +285,15 @@ class Semaphore:
         self.id = uuid.uuid4().hex
         self.name = name or "semaphore-" + uuid.uuid4().hex
         self.max_leases = max_leases
-
-        if self.client.asynchronous:
-            self._started = self.client.scheduler.semaphore_create(
-                name=self.name, max_leases=max_leases
-            )
-        else:
-            self.client.sync(
-                self.client.scheduler.semaphore_create,
-                name=self.name,
-                max_leases=max_leases,
-            )
-            self._started = asyncio.sleep(0)
+        self.max_request_timeout = max_request_timeout or parse_timedelta(
+            dask.config.get("distributed.scheduler.locks.max-request-timeout"),
+            default="s",
+        )
+        self._started = self.client.sync(
+            self.client.scheduler.semaphore_create,
+            name=self.name,
+            max_leases=max_leases,
+        )
 
     def __await__(self):
         async def create_semaphore():
@@ -307,16 +309,25 @@ class Semaphore:
         If the internal counter is greater than zero, decrement it by one and return True immediately.
         If it is zero, wait until a release() is called and return True.
         """
-        # TODO: This (may?) keep the HTTP request open until timeout runs out (forever if None).
-        #  Can do this in batches of smaller timeouts.
-        # TODO: what if connection breaks up?
-        return self.client.sync(
-            self.client.scheduler.semaphore_acquire,
-            name=self.name,
-            timeout=timeout,
-            client=self.client.id,
-            identifier=self.id,
-        )
+        w = _Watch(timeout)
+        w.start()
+
+        while timeout is None or w.leftover():
+            if timeout:
+                req_timeout = min(self.max_request_timeout, w.leftover())
+            else:
+                req_timeout = self.max_request_timeout
+
+            res = self.client.sync(
+                self.client.scheduler.semaphore_acquire,
+                name=self.name,
+                timeout=req_timeout,
+                client=self.client.id,
+                identifier=self.id,
+            )
+            if res:
+                return res
+        return False
 
     def release(self):
         """

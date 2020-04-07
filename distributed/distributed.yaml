@@ -40,6 +40,7 @@ distributed:
         cert: null
     locks:
       lease-validation-interval: 10s  # The time to wait until an acquired semaphore is released if the Client goes out of scope
+      max-request-timeout: 30s  # When trying to acquire a lease split the total wait timeout into chunks of this size
 
   worker:
     blocked-handlers: []
