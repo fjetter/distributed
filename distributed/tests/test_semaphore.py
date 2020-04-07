@@ -5,9 +5,10 @@ from dask.distributed import Client
 
 from distributed import Semaphore
 from distributed.metrics import time
-from distributed.utils_test import cluster, gen_cluster
+from distributed.utils_test import cluster, gen_cluster, captured_logger
 from distributed.utils_test import client, loop, cluster_fixture  # noqa: F401
 import pytest
+import logging
 
 
 @gen_cluster(client=True)
@@ -244,3 +245,41 @@ async def test_release_once_too_many_resilience(c, s, a, b):
     assert not s.extensions["semaphores"].leases["x"]
     await sem.acquire()
     assert len(s.extensions["semaphores"].leases["x"]) == 1
+
+
+@gen_cluster(client=True)
+async def test_acuire_respect_max_request_timeout(c, s, a, b):
+
+    sem = await Semaphore(max_request_timeout="10ms")
+    id_to_wait = None
+
+    def do_something(sem):
+        import time
+
+        time.sleep(0.05)
+        sem.acquire()
+        sem.release()
+        return sem.id
+
+    def wait_and_release(sem):
+        import time
+
+        sem.acquire()
+        time.sleep(0.1)
+        sem.release()
+
+    futures = [
+        c.submit(do_something, sem=sem),
+        c.submit(wait_and_release, sem=sem),
+    ]
+    with captured_logger("distributed.semaphore", level=logging.DEBUG) as caplog:
+        results = await c.gather(futures)
+    id_to_wait = results[0]
+
+    filtered = [
+        val
+        for val in caplog.getvalue().split("\n")
+        if f"Trying to acquire a lease using ID: ``{id_to_wait}``" in val
+    ]
+    assert len(filtered) > 1
+    sem.close()

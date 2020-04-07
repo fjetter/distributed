@@ -115,7 +115,14 @@ class SemaphoreExtension:
                 # Reset the event and try to get a release. The event will be set if the state
                 # is changed and helps to identify when it is worth to retry an acquire
                 self.events[name].clear()
-
+                logger.debug(
+                    "Try to acquire a lease for ``%s`` for ID ``%s`` using Client ``%s``. "
+                    "Time left ``%s``.",
+                    name,
+                    identifier,
+                    client,
+                    w.leftover(),
+                )
                 # If we hit the timeout, this cancels the _get_lease
                 future = asyncio.wait_for(
                     self._get_lease(client, name, identifier), timeout=w.leftover()
@@ -129,6 +136,14 @@ class SemaphoreExtension:
                 # If acquiring fails, we wait for the event to be set, i.e. something has
                 # been released and we can try to acquire again (continue loop)
                 if not result:
+                    logger.debug(
+                        "Unuccessful acquisition for ``%s`` for ID ``%s`` using Client ``%s``. "
+                        "Waiting %s for release to retry again.",
+                        name,
+                        identifier,
+                        client,
+                        w.leftover(),
+                    )
                     future = asyncio.wait_for(
                         self.events[name].wait(), timeout=w.leftover()
                     )
@@ -137,6 +152,13 @@ class SemaphoreExtension:
                         continue
                     except TimeoutError:
                         result = False
+                logger.debug(
+                    "Acquisition result for ``%s`` for ID ``%s`` using Client ``%s`` is ``%s``.",
+                    name,
+                    identifier,
+                    client,
+                    result,
+                )
                 return result
 
     def release(self, comm=None, name=None, client=None, identifier=None):
@@ -157,12 +179,19 @@ class SemaphoreExtension:
                 )
 
     def _release_value(self, name, client, identifier):
+        logger.debug(
+            "Releasing ID: ``%s`` from Client ``%s`` for ``%s``",
+            identifier,
+            client,
+            name,
+        )
         # Everything needs to be atomic here.
         self.leases_per_client[client][name].remove(identifier)
         self.leases[name].remove(identifier)
         self.events[name].set()
 
     def _release_client(self, client):
+        logger.debug("Releasing Client ``%s``", client)
         semaphore_names = list(self.leases_per_client[client])
         for name in semaphore_names:
             ids = list(self.leases_per_client[client][name])
@@ -172,6 +201,7 @@ class SemaphoreExtension:
 
     def _validate_leases(self):
         if not self._validation_running:
+            logger.debug("Validate leases for %s", type(self))
             self._validation_running = True
             known_clients_with_leases = set(self.leases_per_client.keys())
             scheduler_clients = set(self.scheduler.clients.keys())
@@ -182,6 +212,8 @@ class SemaphoreExtension:
 
     def close(self, comm=None, name=None):
         """Hard close the semaphore without warning clients which still hold a lease."""
+
+        logger.info("Closing semaphore %s", name)
         with log_errors():
             if not self._semaphore_exists(name):
                 return
@@ -285,9 +317,12 @@ class Semaphore:
         self.id = uuid.uuid4().hex
         self.name = name or "semaphore-" + uuid.uuid4().hex
         self.max_leases = max_leases
-        self.max_request_timeout = max_request_timeout or parse_timedelta(
-            dask.config.get("distributed.scheduler.locks.max-request-timeout"),
-            default="s",
+        self.max_request_timeout = max_request_timeout or dask.config.get(
+            "distributed.scheduler.locks.max-request-timeout"
+        )
+
+        self.max_request_timeout = parse_timedelta(
+            self.max_request_timeout, default="s",
         )
         self._started = self.client.sync(
             self.client.scheduler.semaphore_create,
@@ -311,13 +346,18 @@ class Semaphore:
         """
         w = _Watch(timeout)
         w.start()
-
         while timeout is None or w.leftover():
             if timeout:
                 req_timeout = min(self.max_request_timeout, w.leftover())
             else:
                 req_timeout = self.max_request_timeout
-
+            print("acq")
+            logger.debug(
+                "Trying to acquire a lease using ID: ``%s`` using Client: ``%s``. Time left %ss.",
+                self.id,
+                self.client.id,
+                w.leftover(),
+            )
             res = self.client.sync(
                 self.client.scheduler.semaphore_acquire,
                 name=self.name,
@@ -326,7 +366,19 @@ class Semaphore:
                 identifier=self.id,
             )
             if res:
+                logger.debug(
+                    "Successfully acquired lease with ID: ``%s`` using Client: ``%s`` after %ss",
+                    self.id,
+                    self.client.id,
+                    w.leftover(),
+                )
                 return res
+        logger.debug(
+            "Failed to acquire lease with ID: ``%s`` using Client: ``%s`` after timeout %s",
+            self.id,
+            self.client.id,
+            timeout,
+        )
         return False
 
     def release(self):
@@ -335,9 +387,11 @@ class Semaphore:
 
         Increment the internal counter by one.
         """
-
-        """ Release the lock if already acquired """
-        # TODO: what if connection breaks up?
+        logger.debug(
+            "Releasing lease with ID: ``%s`` using Client: ``%s``",
+            self.id,
+            self.client.id,
+        )
         return self.client.sync(
             self.client.scheduler.semaphore_release,
             name=self.name,
@@ -362,12 +416,18 @@ class Semaphore:
     def __getstate__(self):
         # Do not serialize the address since workers may have different
         # addresses for the scheduler (e.g. if a proxy is between them)
-        return (self.name, self.max_leases)
+        return (self.name, self.max_leases, self.max_request_timeout)
 
     def __setstate__(self, state):
-        name, max_leases = state
+        name, max_leases, max_request_timeout = state
         client = get_client()
-        self.__init__(name=name, client=client, max_leases=max_leases)
+        self.__init__(
+            name=name,
+            client=client,
+            max_leases=max_leases,
+            max_request_timeout=max_request_timeout,
+        )
 
     def close(self):
+        logger.info("Closing semaphore %s", self.name)
         return self.client.sync(self.client.scheduler.semaphore_close, name=self.name)
