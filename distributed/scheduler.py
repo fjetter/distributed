@@ -81,7 +81,6 @@ from .publish import PublishExtension
 from .queues import QueueExtension
 from .semaphore import SemaphoreExtension
 from .recreate_exceptions import ReplayExceptionScheduler
-from .lock import LockExtension
 from .pubsub import PubSubSchedulerExtension
 from .stealing import WorkStealing
 from .variable import VariableExtension
@@ -94,7 +93,6 @@ LOG_PDB = dask.config.get("distributed.admin.pdb-on-err")
 DEFAULT_DATA_SIZE = dask.config.get("distributed.scheduler.default-data-size")
 
 DEFAULT_EXTENSIONS = [
-    LockExtension,
     PublishExtension,
     ReplayExceptionScheduler,
     QueueExtension,
