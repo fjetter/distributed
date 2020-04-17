@@ -84,6 +84,8 @@ async def gather_from_workers(who_has, rpc, close=True, serializers=None, who=No
                     )
                     missing_workers.add(worker)
                 else:
+                    if r["status"] == "busy":
+                        continue
                     response.update(r["data"])
         finally:
             for r in rpcs.values():

@@ -4031,8 +4031,12 @@ async def test_retire_many_workers(c, s, *workers):
 
     assert all(future.done() for future in futures)
     assert all(s.tasks[future.key].state == "memory" for future in futures)
+
+    total_keys = 0
     for w, keys in s.has_what.items():
-        assert 15 < len(keys) < 50
+        total_keys += len(keys)
+        assert 0 < len(keys) < 100
+    assert total_keys == 100
 
 
 @gen_cluster(
