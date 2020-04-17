@@ -42,9 +42,7 @@ async def test_simultaneous_scale_up_and_down(cleanup):
                 while len(s.rprocessing) < 3:
                     await asyncio.sleep(0.001)
 
-                ta = cluster.adapt(
-                    interval="100 ms", scale_factor=2, Adaptive=TestAdaptive
-                )
+                ta = cluster.adapt(interval="100 ms", Adaptive=TestAdaptive)
 
                 await asyncio.sleep(0.3)
 

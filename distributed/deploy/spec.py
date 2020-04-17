@@ -308,9 +308,9 @@ class SpecCluster(Cluster):
                     names=list(to_close), close_workers=True
                 )
 
-            for name in to_close:
-                if name in self.workers:
-                    del self.workers[name]
+                for name in to_close:
+                    if name in self.workers:
+                        del self.workers[name]
 
             to_open = set(self.worker_spec) - set(self.workers)
             workers = []
@@ -495,7 +495,7 @@ class SpecCluster(Cluster):
         for w in workers:
             if w in self.worker_spec:
                 del self.worker_spec[w]
-        await self
+        await self._correct_state()
 
     scale_up = scale  # backwards compatibility
 

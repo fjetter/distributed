@@ -1248,6 +1248,7 @@ class Scheduler(ServerNode):
         self.host_info = defaultdict(dict)
         self.resources = defaultdict(dict)
         self.aliases = dict()
+        self.active = set()
 
         self._task_state_collections = [self.unrunnable]
 
@@ -1256,6 +1257,7 @@ class Scheduler(ServerNode):
             self.host_info,
             self.resources,
             self.aliases,
+            self.active,
         ]
 
         self.extensions = {}
@@ -1381,10 +1383,6 @@ class Scheduler(ServerNode):
 
         setproctitle("dask-scheduler [not started]")
         Scheduler._instances.add(self)
-
-    @property
-    def active(self):
-        return {ws for ws in self.workers.values() if not ws.retiring}
 
     ##################
     # Administration #
@@ -1572,7 +1570,18 @@ class Scheduler(ServerNode):
             nanny_addr = self.workers[worker].nanny
             address = nanny_addr or worker
 
-            self.worker_send(worker, {"op": "close", "report": False})
+            if nanny_addr:
+                msg = {"op": "terminate"}
+                comm = await connect(
+                    nanny_addr,
+                    deserialize=self.deserialize,
+                    connection_args=self.connection_args,
+                )
+                comm.name = "Close nanny"
+                await send_recv(comm, close=True, **msg)
+            else:
+                self.worker_send(worker, {"op": "close", "report": False})
+
             self.remove_worker(address=worker, safe=safe)
 
     ###########
@@ -1700,7 +1709,7 @@ class Scheduler(ServerNode):
                 nanny=nanny,
                 extra=extra,
             )
-
+            self.active.add(ws)
             if "addresses" not in self.host_info[host]:
                 self.host_info[host].update({"addresses": set(), "nthreads": 0})
 
@@ -2468,10 +2477,10 @@ class Scheduler(ServerNode):
 
         actual_total_occupancy = 0
         for worker, ws in self.workers.items():
-            assert abs(sum(ws.processing.values()) - ws.occupancy) < 1e-8
+            assert abs(sum(ws.processing.values()) - ws.occupancy) < 1e-6
             actual_total_occupancy += ws.occupancy
 
-        assert abs(actual_total_occupancy - self.total_occupancy) < 1e-8, (
+        assert abs(actual_total_occupancy - self.total_occupancy) < 1e-6, (
             actual_total_occupancy,
             self.total_occupancy,
         )
@@ -3395,6 +3404,7 @@ class Scheduler(ServerNode):
             ws = self.workers[worker]
 
             ws.retiring = True
+            self.active.remove(ws)
 
             # TODO: There is a misalignment between nanny and worker close_gracefully, hence the new coroutine name
             self.worker_send(worker, {"op": "prepare_retirement"})
@@ -3445,6 +3455,7 @@ class Scheduler(ServerNode):
         Scheduler.workers_to_close
         """
         with log_errors():
+            original_input_workers = workers
             if names is not None:
                 if names:
                     logger.info("Retire worker names %s", names)
@@ -3458,7 +3469,11 @@ class Scheduler(ServerNode):
             if workers_not_known:
                 logger.error("Tried to retire unknown workers: %s", workers_not_known)
             if not workers:
-                logger.error("Called retire_workers but no workers selected.")
+                logger.error(
+                    "Called retire_workers but no workers selected with workers:%s and names:%s",
+                    original_input_workers,
+                    names,
+                )
                 return {}
             logger.info("Retire workers %s", workers)
 
@@ -4877,7 +4892,7 @@ class Scheduler(ServerNode):
                 s = ww
             else:
                 s &= ww
-        print("Exit valid workers")
+        # print("Exit valid workers")
         if s is True:
             return s
         else:
@@ -4975,21 +4990,12 @@ class Scheduler(ServerNode):
             )
         return self._ipython_kernel.get_connection_info()
 
-    def _ensure_ws(self, ws):
-        if isinstance(ws, str):
-            return self.workers[ws]
-        elif isinstance(ws, WorkerState):
-            return ws
-        else:
-            raise RuntimeError("I hate the ws BS")
-
     def worker_objective(self, ts, ws):
         """
         Objective function to determine which worker should get the task
 
         Minimize expected start time.  If a tie then break with data storage.
         """
-        ws = self._ensure_ws(ws)
         if not ws.active:
             return (math.inf, None)
         comm_bytes = sum(

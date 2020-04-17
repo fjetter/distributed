@@ -1095,13 +1095,8 @@ class Worker(ServerNode):
         return self.close(*args, **kwargs)
 
     async def prepare_retirement(self):
-        self.periodic_callbacks["memory"].stop()
-        # Memory monitor may have toggled this on again. Wait for the monitor to
-        # finish and set it to paused
         self.paused = True
-        while self.memory_monitor_active:
-            await asyncio.sleep(0)
-            self.paused = True
+        self.status = "closing-gracefully"
 
     async def close(
         self, report=True, timeout=10, nanny=True, executor_wait=True, safe=False
@@ -2638,6 +2633,9 @@ class Worker(ServerNode):
         frac = memory / self.memory_limit
 
         def check_pause(memory):
+            if self.status == "close-gracefully":
+                self.pause = True
+                return
             frac = memory / self.memory_limit
             # Pause worker threads if above 80% memory use
             if self.memory_pause_fraction and frac > self.memory_pause_fraction:
