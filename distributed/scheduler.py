@@ -1571,14 +1571,7 @@ class Scheduler(ServerNode):
             address = nanny_addr or worker
 
             if nanny_addr:
-                msg = {"op": "terminate"}
-                comm = await connect(
-                    nanny_addr,
-                    deserialize=self.deserialize,
-                    connection_args=self.connection_args,
-                )
-                comm.name = "Close nanny"
-                await send_recv(comm, close=True, **msg)
+                await self.rpc(nanny_addr).terminate()
             else:
                 self.worker_send(worker, {"op": "close", "report": False})
 
@@ -3502,10 +3495,6 @@ class Scheduler(ServerNode):
                             keys=keys, n=1, delete=False, lock=False,
                         )
                     else:
-                        logger.warning(
-                            "Need to move %d keys but there are no workers left",
-                            len(keys),
-                        )
                         return {}
 
             worker_keys = {ws.address: ws.identity() for ws in workers}
