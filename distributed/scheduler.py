@@ -1242,7 +1242,6 @@ class Scheduler(ServerNode):
 
         self.idle = sortedcontainers.SortedSet(key=operator.attrgetter("address"))
         self.saturated = set()
-        self.active = set()
 
         self.total_nthreads = 0
         self.total_occupancy = 0
@@ -1382,6 +1381,10 @@ class Scheduler(ServerNode):
 
         setproctitle("dask-scheduler [not started]")
         Scheduler._instances.add(self)
+
+    @property
+    def active(self):
+        return {ws for ws in self.workers.values() if not ws.retiring}
 
     ##################
     # Administration #
@@ -2231,7 +2234,6 @@ class Scheduler(ServerNode):
                         )
                         r = self.transition(k, "erred", exception=e, cause=k)
                         recommendations.update(r)
-            self.active.discard(ws)
 
             for ts in ws.has_what:
                 ts.who_has.remove(ws)
@@ -3449,25 +3451,15 @@ class Scheduler(ServerNode):
                 names = set(map(str, names))
                 workers = [ws.address for ws in self.active if str(ws.name) in names]
             if workers is None:
-                while True:
-                    try:
-                        workers = self.workers_to_close(**kwargs)
-                        if workers:
-                            workers = await self.retire_workers(
-                                workers=workers,
-                                remove=remove,
-                                close_workers=close_workers,
-                            )
-                        return workers
-                    except KeyError:  # keys left during replicate
-                        pass
+                workers = self.workers_to_close(**kwargs)
 
             workers_not_known = {w for w in workers if w not in self.workers}
             workers = {self.workers[w] for w in workers if w in self.workers}
-            logger.error("Tried to retire unknown workers: %s", workers_not_known)
+            if workers_not_known:
+                logger.error("Tried to retire unknown workers: %s", workers_not_known)
             if not workers:
                 logger.error("Called retire_workers but no workers selected.")
-                return []
+                return {}
             logger.info("Retire workers %s", workers)
 
             worker_keys = {ws.address: ws.identity() for ws in workers}
@@ -3479,7 +3471,6 @@ class Scheduler(ServerNode):
             await asyncio.gather(
                 *[self.notify_worker_retirement(worker=w) for w in worker_keys]
             )
-
             # TODO: Do I need to lock here? replicate can call it on its own
             async with self._lock if lock else empty_context:
                 # Keys orphaned by retiring those workers
@@ -3500,7 +3491,7 @@ class Scheduler(ServerNode):
                             "Need to move %d keys but there are no workers left",
                             len(keys),
                         )
-                        return []
+                        return {}
 
             worker_keys = {ws.address: ws.identity() for ws in workers}
             if close_workers and worker_keys:
@@ -4811,12 +4802,10 @@ class Scheduler(ServerNode):
             occ = ws.occupancy
 
         if not ws.active:
-            self.active.discard(ws)
             self.saturated.discard(ws)
             self.idle.discard(ws)
             return
 
-        self.active.add(ws)
         nc = ws.nthreads
         p = len(ws.processing)
 
@@ -4835,7 +4824,7 @@ class Scheduler(ServerNode):
                 self.saturated.discard(ws)
 
     def valid_workers(self, ts):
-        """ Return set of currently valid workers for key
+        """ Return set of currently valid ``WorkerState``s for key
 
         If all workers are valid then this returns ``True``.
         This checks tracks the following state:
@@ -4845,17 +4834,19 @@ class Scheduler(ServerNode):
         *  resource_restrictions
         """
         s = True
-
         if len(self.active) != len(self.workers):
             s = self.active
 
         if ts.worker_restrictions:
-            ss = {w for w in ts.worker_restrictions if w in self.workers}
+            ss = {
+                self.workers[addr]
+                for addr in ts.worker_restrictions
+                if addr in self.workers
+            }
             if s is True:
                 s = ss
             else:
                 s &= ss
-
         if ts.host_restrictions:
             # Resolve the alias here rather than early, for the worker
             # may not be connected when host_restrictions is populated
@@ -4863,6 +4854,7 @@ class Scheduler(ServerNode):
             # XXX need HostState?
             ss = [self.host_info[h]["addresses"] for h in hr if h in self.host_info]
             ss = set.union(*ss) if ss else set()
+            ss = {self.workers[addr] for addr in ss}
             if s is True:
                 s = ss
             else:
@@ -4879,12 +4871,13 @@ class Scheduler(ServerNode):
             }
 
             ww = set.intersection(*w.values())
+            ww = {self.workers[addr] for addr in ww}
 
             if s is True:
                 s = ww
             else:
                 s &= ww
-
+        print("Exit valid workers")
         if s is True:
             return s
         else:
@@ -4982,12 +4975,21 @@ class Scheduler(ServerNode):
             )
         return self._ipython_kernel.get_connection_info()
 
+    def _ensure_ws(self, ws):
+        if isinstance(ws, str):
+            return self.workers[ws]
+        elif isinstance(ws, WorkerState):
+            return ws
+        else:
+            raise RuntimeError("I hate the ws BS")
+
     def worker_objective(self, ts, ws):
         """
         Objective function to determine which worker should get the task
 
         Minimize expected start time.  If a tie then break with data storage.
         """
+        ws = self._ensure_ws(ws)
         if not ws.active:
             return (math.inf, None)
         comm_bytes = sum(
@@ -5353,7 +5355,7 @@ class Scheduler(ServerNode):
             return len(self.workers) - len(to_close)
 
 
-def decide_worker(ts, all_workers, valid_workers, objective):
+def decide_worker(ts, all_workers, valid_workers, objective) -> WorkerState:
     """
     Decide which worker should take task *ts*.
 
@@ -5370,6 +5372,10 @@ def decide_worker(ts, all_workers, valid_workers, objective):
     *objective* function.
     """
     deps = ts.dependencies
+    assert all(isinstance(w, WorkerState) for w in all_workers)
+    assert valid_workers is True or all(
+        isinstance(w, WorkerState) for w in valid_workers
+    )
     assert all(dts.who_has for dts in deps)
     if ts.actor:
         candidates = all_workers
@@ -5389,6 +5395,8 @@ def decide_worker(ts, all_workers, valid_workers, objective):
                     return None
     if not candidates:
         return None
+
+    assert all(isinstance(w, WorkerState) for w in candidates)
 
     if len(candidates) == 1:
         return first(candidates)

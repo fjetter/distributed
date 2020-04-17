@@ -713,8 +713,10 @@ async def test_retire_workers(c, s, a, b):
     assert list(workers) == [a.address]
     assert workers[a.address]["nthreads"] == a.nthreads
     assert list(s.nthreads) == [b.address]
-
+    await asyncio.sleep(0.01)
     assert s.workers_to_close() == []
+
+    assert await x.result() == 1
 
     assert s.workers[b.address].has_what == {s.tasks[x.key], s.tasks[y.key]}
 
@@ -733,7 +735,8 @@ async def test_retire_workers_steal_tasks(c, s, a, b):
 
     retire = s.retire_workers(workers=[b.address], remove=False)
 
-    # The lock is used to restrict access to
+    # The lock is used to restrict access to the replication which will
+    # artificially "slow down by acquiring the lock" here
     acquire_lock = await s._lock.acquire()
 
     async def emulate_slow_replication(s, a, b):
@@ -746,7 +749,7 @@ async def test_retire_workers_steal_tasks(c, s, a, b):
         replication to proceed.
         """
         while len(s.active) == 2:
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.01)
         assert b.paused
         assert a.address in {w.address for w in s.active}
         assert b.address not in {w.address for w in s.active}
@@ -1767,7 +1770,8 @@ async def test_retire_names_str(cleanup):
                     futures = c.map(inc, range(10))
                     await wait(futures)
                     assert a.data and b.data
-                    await s.retire_workers(names=[0])
+                    await s.retire_workers(names=["0"])
+                    await asyncio.sleep(0.05)
                     assert all(f.done() for f in futures)
                     assert len(b.data) == 10
 
@@ -2108,7 +2112,6 @@ async def test_multiple_listeners(cleanup):
                     async with Client(s.address, asynchronous=True) as c:
                         futures = c.map(inc, range(20))
                         await wait(futures)
-
                         # Force inter-worker communication both ways
                         await c.submit(sum, futures, workers=[a.address])
                         await c.submit(len, futures, workers=[b.address])
