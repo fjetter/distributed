@@ -1748,6 +1748,7 @@ class Worker(ServerNode):
         try:
             while (
                 changed
+                and not self.paused
                 and self.data_needed
                 and len(self.in_flight_workers) < self.total_out_connections
             ):
@@ -2670,7 +2671,7 @@ class Worker(ServerNode):
                     # before trying to evict even more data.
                     self._throttled_gc.collect()
                     memory = proc.memory_info().rss
-            check_pause(memory)
+                check_pause(memory)
             if count:
                 logger.debug(
                     "Moved %d pieces of data data and %s to disk",
