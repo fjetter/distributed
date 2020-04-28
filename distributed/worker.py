@@ -647,6 +647,12 @@ class Worker(ServerNode):
             connection_args=self.connection_args,
             **kwargs
         )
+        self.data_in_use = defaultdict(int)
+        self.data_in_use_size = dict()
+
+        pc = PeriodicCallback(self.observe_data_duplication, 1000)
+        self.periodic_callbacks["spill-duplication"] = pc
+        pc.start()
 
         self.scheduler = self.rpc(scheduler_addr)
         self.execution_state = {
@@ -775,6 +781,18 @@ class Worker(ServerNode):
                 pass
 
         return merge(custom, self.monitor.recent(), core)
+
+    def observe_data_duplication(self):
+        duplication = {}
+        for k in self.data_in_use:
+            if k not in self.data.fast:
+                duplication[k] = self.data_in_use[k] * self.data_in_use_size[k]
+        if duplication:
+            logger.critical(
+                "Data duplication caused by spilling used data observed with %s keys accumulatinng %s bytes.",
+                len(duplication),
+                sum(duplication.values()),
+            )
 
     async def get_startup_information(self):
         result = {}
@@ -1229,7 +1247,12 @@ class Worker(ServerNode):
             return {"status": "busy"}
 
         self.outgoing_current_count += 1
-        data = {k: self.data[k] for k in keys if k in self.data}
+        data = {}
+        for k in keys:
+            if k in self.data:
+                data[k] = self.data[k]
+                self.data_in_use[k] += 1
+                self.data_in_use_size[k] = sizeof(data[k])
 
         if len(data) < len(keys):
             for k in set(keys) - set(data):
@@ -1257,6 +1280,11 @@ class Worker(ServerNode):
             raise
         finally:
             self.outgoing_current_count -= 1
+            for k in data:
+                self.data_in_use[k] -= 1
+                if self.data_in_use[k] == 0:
+                    del self.data_in_use[k]
+                    del self.data_in_use_size[k]
         stop = time()
         if self.digests is not None:
             self.digests["get-data-send-duration"].add(stop - start)
@@ -2484,6 +2512,8 @@ class Worker(ServerNode):
             for k in self.dependencies[key]:
                 try:
                     data[k] = self.data[k]
+                    self.data_in_use[k] += 1
+                    self.data_in_use_size[k] = sizeof(data[k])
                 except KeyError:
                     from .actor import Actor  # TODO: create local actor
 
@@ -2516,6 +2546,11 @@ class Worker(ServerNode):
                         self.scheduler_delay,
                     ),
                 )
+                for k in data:
+                    self.data_in_use[k] -= 1
+                    if self.data_in_use[k] == 0:
+                        del self.data_in_use[k]
+                        del self.data_in_use_size[k]
             except RuntimeError as e:
                 executor_error = e
                 raise
@@ -2638,9 +2673,10 @@ class Worker(ServerNode):
             start = time()
             logger.info(
                 "Worker is at %d%% memory usage. Start spilling data to disk."
-                "Process memory: %s -- Bytes in flight %s -- Worker memory limit: %s",
+                "Process memory: %s -- Bytes in use %s -- Bytes in flight %s -- Worker memory limit: %s",
                 int(frac * 100),
                 format_bytes(process_memory),
+                format_bytes(sum(self.data_in_use_size.values())),
                 format_bytes(self.comm_nbytes),
                 format_bytes(self.memory_limit)
                 if self.memory_limit is not None
@@ -2651,19 +2687,29 @@ class Worker(ServerNode):
             count = 0
             need = memory - target
             while memory > target:
-                if not self.data.fast:
+                if not self.data.fast or len(self.data.fast) == len(self.data_in_use):
                     logger.warning(
                         "Memory use is high but worker has no data "
                         "to store to disk.  Perhaps some other process "
                         "is leaking memory?  Process memory: %s -- "
+                        "Bytes in use %s -- "
                         "Worker memory limit: %s",
                         format_bytes(memory),
+                        format_bytes(sum(self.data_in_use_size.values())),
                         format_bytes(self.memory_limit)
                         if self.memory_limit is not None
                         else "None",
                     )
                     break
                 k, v, weight = self.data.fast.evict()
+                if k in self.data_in_use:
+                    logger.warning(
+                        "Evicted data %s currently in use with %s. "
+                        "This will duplicate memory if the key is cycled back "
+                        "into memory before it is released.",
+                        k,
+                        format_bytes(self.data_in_use_size[k]),
+                    )
                 del k, v
                 total += weight
                 count += 1
@@ -2683,7 +2729,7 @@ class Worker(ServerNode):
                     memory = proc.memory_info().rss + self.comm_nbytes
             check_pause(memory)
             if count:
-                logger.info(
+                logger.debug(
                     "Moved %d pieces of data data and %s to disk in %ss",
                     count,
                     format_bytes(total),
