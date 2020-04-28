@@ -352,7 +352,7 @@ class Worker(ServerNode):
         self.total_in_connections = dask.config.get(
             "distributed.worker.connections.incoming"
         )
-        self.total_comm_nbytes = 10e6
+        self.total_comm_nbytes = 1 * 1024 ** 3
         self.comm_nbytes = 0
         self.suspicious_deps = defaultdict(lambda: 0)
         self._missing_dep_flight = set()
@@ -1796,9 +1796,10 @@ class Worker(ServerNode):
 
                 in_flight = False
 
-                while deps and (
-                    len(self.in_flight_workers) < self.total_out_connections
-                    or self.comm_nbytes < self.total_comm_nbytes
+                while (
+                    deps
+                    and len(self.in_flight_workers) < self.total_out_connections
+                    and self.comm_nbytes < self.total_comm_nbytes
                 ):
                     dep = deps.pop()
                     if self.dep_state[dep] != "waiting":
@@ -2595,7 +2596,8 @@ class Worker(ServerNode):
         total = 0
 
         proc = self.monitor.proc
-        memory = proc.memory_info().rss
+        process_memory = proc.memory_info().rss
+        memory = process_memory + self.comm_nbytes
         frac = memory / self.memory_limit
 
         def check_pause(memory):
@@ -2607,9 +2609,10 @@ class Worker(ServerNode):
                 if not self.paused:
                     logger.warning(
                         "Worker is at %d%% memory usage. Pausing worker.  "
-                        "Process memory: %s -- Worker memory limit: %s",
+                        "Process memory: %s -- Bytes in flight %s -- Worker memory limit: %s",
                         int(frac * 100),
                         format_bytes(memory),
+                        self.comm_nbytes,
                         format_bytes(self.memory_limit)
                         if self.memory_limit is not None
                         else "None",
@@ -2618,9 +2621,10 @@ class Worker(ServerNode):
             elif self.paused:
                 logger.warning(
                     "Worker is at %d%% memory usage. Resuming worker. "
-                    "Process memory: %s -- Worker memory limit: %s",
+                    "Process memory: %s -- Bytes in flight %s -- Worker memory limit: %s",
                     int(frac * 100),
                     format_bytes(memory),
+                    self.comm_nbytes,
                     format_bytes(self.memory_limit)
                     if self.memory_limit is not None
                     else "None",
@@ -2631,9 +2635,16 @@ class Worker(ServerNode):
         check_pause(memory)
         # Dump data to disk if above 70%
         if self.memory_spill_fraction and frac > self.memory_spill_fraction:
-            logger.debug(
-                "Worker is at %d%% memory usage. Start spilling data to disk.",
+            start = time()
+            logger.info(
+                "Worker is at %d%% memory usage. Start spilling data to disk."
+                "Process memory: %s -- Bytes in flight %s -- Worker memory limit: %s",
                 int(frac * 100),
+                format_bytes(process_memory),
+                format_bytes(self.comm_nbytes),
+                format_bytes(self.memory_limit)
+                if self.memory_limit is not None
+                else "None",
             )
             start = time()
             target = self.memory_limit * self.memory_target_fraction
@@ -2663,19 +2674,20 @@ class Worker(ServerNode):
                 if time() - start > 0.5:
                     await asyncio.sleep(0)
                     start = time()
-                memory = proc.memory_info().rss
+                memory = proc.memory_info().rss + self.comm_nbytes
                 if total > need and memory > target:
                     # Issue a GC to ensure that the evicted data is actually
                     # freed from memory and taken into account by the monitor
                     # before trying to evict even more data.
                     self._throttled_gc.collect()
-                    memory = proc.memory_info().rss
+                    memory = proc.memory_info().rss + self.comm_nbytes
             check_pause(memory)
             if count:
-                logger.debug(
-                    "Moved %d pieces of data data and %s to disk",
+                logger.info(
+                    "Moved %d pieces of data data and %s to disk in %ss",
                     count,
                     format_bytes(total),
+                    time() - start,
                 )
 
         self._memory_monitoring = False

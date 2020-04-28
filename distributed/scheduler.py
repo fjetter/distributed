@@ -2974,7 +2974,7 @@ class Scheduler(ServerNode):
 
         async def send_message(addr):
             comm = await connect(
-                addr, deserialize=self.deserialize, connection_args=self.connection_args
+                addr, deserialize=self.deserialize, **self.connection_args
             )
             comm.name = "Scheduler Broadcast"
             resp = await send_recv(comm, close=True, serializers=serializers, **msg)
