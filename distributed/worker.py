@@ -2593,7 +2593,8 @@ class Worker(ServerNode):
         total = 0
 
         proc = self.monitor.proc
-        memory = proc.memory_info().rss
+        process_memory = proc.memory_info().rss
+        memory = process_memory + self.comm_nbytes
         frac = memory / self.memory_limit
 
         def check_pause(memory):
@@ -2629,9 +2630,18 @@ class Worker(ServerNode):
         check_pause(memory)
         # Dump data to disk if above 70%
         if self.memory_spill_fraction and frac > self.memory_spill_fraction:
+            start = time()
             logger.debug(
-                "Worker is at %d%% memory usage. Start spilling data to disk.",
+                "Worker is at %d%% memory usage. Start spilling data to disk. "
+                "Process memory: %s -- "
+                "Bytes in flight: %s -- "
+                "Worker memory limit: %s",
                 int(frac * 100),
+                format_bytes(process_memory),
+                format_bytes(self.comm_nbytes),
+                format_bytes(self.memory_limit)
+                if self.memory_limit is not None
+                else "None",
             )
             start = time()
             target = self.memory_limit * self.memory_target_fraction
@@ -2642,9 +2652,12 @@ class Worker(ServerNode):
                     logger.warning(
                         "Memory use is high but worker has no data "
                         "to store to disk.  Perhaps some other process "
-                        "is leaking memory?  Process memory: %s -- "
+                        "is leaking memory?  "
+                        "Process memory: %s -- "
+                        "Bytes in flight: %s -- "
                         "Worker memory limit: %s",
-                        format_bytes(memory),
+                        format_bytes(process_memory),
+                        format_bytes(self.comm_nbytes),
                         format_bytes(self.memory_limit)
                         if self.memory_limit is not None
                         else "None",
@@ -2661,19 +2674,22 @@ class Worker(ServerNode):
                 if time() - start > 0.5:
                     await asyncio.sleep(0)
                     start = time()
-                memory = proc.memory_info().rss
+                process_memory = proc.memory_info().rss
+                memory = process_memory + self.comm_nbytes
                 if total > need and memory > target:
                     # Issue a GC to ensure that the evicted data is actually
                     # freed from memory and taken into account by the monitor
                     # before trying to evict even more data.
                     self._throttled_gc.collect()
-                    memory = proc.memory_info().rss
+                    process_memory = proc.memory_info().rss
+                    memory = process_memory + self.comm_nbytes
             check_pause(memory)
             if count:
                 logger.debug(
-                    "Moved %d pieces of data data and %s to disk",
+                    "Moved %d pieces of data data and %s to disk in %ss",
                     count,
                     format_bytes(total),
+                    time() - start,
                 )
 
         self._memory_monitoring = False
