@@ -575,7 +575,7 @@ class Worker(ServerNode):
         self.scheduler_delay = 0
         self.stream_comms = dict()
         self.heartbeat_active = False
-        self.memory_monitor_active = False
+
         self._ipython_kernel = None
 
         if self.local_directory not in sys.path:
@@ -1095,7 +1095,6 @@ class Worker(ServerNode):
         return self.close(*args, **kwargs)
 
     async def prepare_retirement(self):
-        self.paused = True
         self.status = "closing-gracefully"
 
     async def close(
@@ -2623,9 +2622,9 @@ class Worker(ServerNode):
 
         If we rise above 80% memory use, stop execution of new tasks
         """
-        if self.memory_monitor_active:
+        if self._memory_monitoring or self.status != "running":
             return
-        self.memory_monitor_active = True
+        self._memory_monitoring = True
         total = 0
 
         proc = self.monitor.proc
@@ -2633,9 +2632,6 @@ class Worker(ServerNode):
         frac = memory / self.memory_limit
 
         def check_pause(memory):
-            if self.status == "close-gracefully":
-                self.pause = True
-                return
             frac = memory / self.memory_limit
             # Pause worker threads if above 80% memory use
             if self.memory_pause_fraction and frac > self.memory_pause_fraction:
@@ -2716,7 +2712,7 @@ class Worker(ServerNode):
                     format_bytes(total),
                 )
 
-        self.memory_monitor_active = False
+        self._memory_monitoring = False
         return total
 
     def cycle_profile(self):
