@@ -304,11 +304,10 @@ class SpecCluster(Cluster):
             pre = list(set(self.workers))
             to_close = set(self.workers) - set(self.worker_spec)
             if to_close:
-                # We currently cannot retire and close worker and nanny,
-                # therefore we need a second step
-                await self.scheduler_comm.retire_workers(
-                    names=list(to_close), close_workers=False
-                )
+                if self.scheduler.status == "running":
+                    await self.scheduler_comm.retire_workers(
+                        names=list(to_close), close_workers=False
+                    )
                 tasks = [self.workers[w].close() for w in to_close if w in self.workers]
                 await asyncio.wait(tasks)
                 for name in to_close:
@@ -390,7 +389,7 @@ class SpecCluster(Cluster):
 
         await self.scheduler.close()
         for w in self._created:
-            assert w.status in ["closed", "closing-gracefully"], w.status
+            assert w.status in ["closed"], w.status
 
         if hasattr(self, "_old_logging_level"):
             silence_logging(self._old_logging_level)
