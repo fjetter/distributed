@@ -66,7 +66,6 @@ from .utils import (
     parse_bytes,
     shutting_down,
     key_split_group,
-    empty_context,
     tmpfile,
     format_bytes,
     format_time,
@@ -1248,7 +1247,7 @@ class Scheduler(ServerNode):
         self.host_info = defaultdict(dict)
         self.resources = defaultdict(dict)
         self.aliases = dict()
-        self.active = set()
+        self.active = dict()
 
         self._task_state_collections = [self.unrunnable]
 
@@ -1690,7 +1689,7 @@ class Scheduler(ServerNode):
                     await comm.write(msg)
                 return
 
-            self.workers[address] = ws = WorkerState(
+            self.workers[address] = self.active[address] = ws = WorkerState(
                 address=address,
                 pid=pid,
                 nthreads=nthreads,
@@ -1702,7 +1701,6 @@ class Scheduler(ServerNode):
                 nanny=nanny,
                 extra=extra,
             )
-            self.active.add(ws)
             if "addresses" not in self.host_info[host]:
                 self.host_info[host].update({"addresses": set(), "nthreads": 0})
 
@@ -2218,6 +2216,7 @@ class Scheduler(ServerNode):
             self.idle.discard(ws)
             self.saturated.discard(ws)
             del self.workers[address]
+            self.active.pop(address, None)
             ws.status = "closed"
             self.total_occupancy -= ws.occupancy
 
@@ -3056,7 +3055,7 @@ class Scheduler(ServerNode):
                     workers = {self.workers[w] for w in workers}
                     workers_by_task = {ts: ts.who_has & workers for ts in tasks}
                 else:
-                    workers = self.active
+                    workers = self.active.values()
                     workers_by_task = {ts: ts.who_has for ts in tasks}
 
                 tasks_by_worker = {ws: set() for ws in workers}
@@ -3160,7 +3159,6 @@ class Scheduler(ServerNode):
         workers=None,
         branching_factor=2,
         delete=True,
-        lock=True,
     ):
         """ Replicate data throughout cluster
 
@@ -3184,7 +3182,7 @@ class Scheduler(ServerNode):
         Scheduler.rebalance
         """
         assert branching_factor > 0
-        async with self._lock if lock else empty_context:
+        async with self._lock:
             workers = {self.workers[w] for w in self.workers_list(workers)}
             if n is None:
                 n = len(workers)
@@ -3336,7 +3334,7 @@ class Scheduler(ServerNode):
             memory_ratio = 2
 
         with log_errors():
-            if not n and all(ws.processing for ws in self.active):
+            if not n and all(ws.processing for ws in self.active.values()):
                 return []
 
             if key is None:
@@ -3346,7 +3344,7 @@ class Scheduler(ServerNode):
             ):
                 key = pickle.loads(key)
 
-            groups = groupby(key, self.active)
+            groups = groupby(key, self.active.values())
 
             limit_bytes = {
                 k: sum(ws.memory_limit for ws in v) for k, v in groups.items()
@@ -3391,16 +3389,16 @@ class Scheduler(ServerNode):
 
             return result
 
-    async def notify_worker_retirement(self, worker):
+    def _retire_worker(self, worker_address):
         with log_errors():
-            self.log_event(worker, {"action": "notify-retire-worker"})
-            ws = self.workers[worker]
-
-            ws.retiring = True
-            self.active.remove(ws)
+            self.log_event(worker_address, {"action": "retire-worker"})
+            self.active[worker_address].retiring = True
+            self.idle.discard(worker_address)
+            self.saturated.discard(worker_address)
+            ws = self.active.pop(worker_address)
 
             # TODO: There is a misalignment between nanny and worker close_gracefully, hence the new coroutine name
-            self.worker_send(worker, {"op": "prepare_retirement"})
+            self.worker_send(worker_address, {"op": "prepare_retirement"})
 
             if "stealing" in self.extensions:
                 steal = self.extensions["stealing"]
@@ -3415,7 +3413,6 @@ class Scheduler(ServerNode):
         remove=True,
         close_workers=False,
         names=None,
-        lock=True,
         **kwargs
     ):
         """ Gracefully retire workers from cluster
@@ -3448,56 +3445,61 @@ class Scheduler(ServerNode):
         Scheduler.workers_to_close
         """
         with log_errors():
-            original_input_workers = workers
             if names is not None:
                 if names:
                     logger.info("Retire worker names %s", names)
                 names = set(map(str, names))
-                workers = [ws.address for ws in self.active if str(ws.name) in names]
+                workers = [addr for addr in self.active if addr in names]
             if workers is None:
                 workers = self.workers_to_close(**kwargs)
 
             workers_not_known = {w for w in workers if w not in self.workers}
-            workers = {self.workers[w] for w in workers if w in self.workers}
+            workers_to_retire = set()
+            for w in workers:
+                if w in self.active:
+                    self._retire_worker(worker_address=w)
+                    workers_to_retire.add(self.workers[w])
+
             if workers_not_known:
                 logger.error("Tried to retire unknown workers: %s", workers_not_known)
-            if not workers:
+            if not workers_to_retire:
                 logger.error(
                     "Called retire_workers but no workers selected with workers:%s and names:%s",
-                    original_input_workers,
+                    workers,
                     names,
                 )
                 return {}
             logger.info("Retire workers %s", workers)
 
-            worker_keys = {ws.address: ws.identity() for ws in workers}
+            worker_keys = {ws.address: ws.identity() for ws in workers_to_retire}
 
             # Nanny would otherwise start the workers again
             # TODO: There is a misalingment between nanny and worker for close_gracefully. I need to notify both since
             # the worker needs to stop whatever it is doing and the nanny must be told not to restart the worker again
-            await self.broadcast(msg={"op": "close_gracefully"}, nanny=True)
-            await asyncio.gather(
-                *[self.notify_worker_retirement(worker=w) for w in worker_keys]
+            # await self.broadcast(msg={"op": "close_gracefully"}, nanny=True)
+
+            # Keys orphaned by retiring those workers
+            keys = set.union(*[w.has_what for w in workers_to_retire])
+            keys = {ts.key for ts in keys if ts.who_has.issubset(workers_to_retire)}
+
+            other_workers = set(self.active.values()) - workers_to_retire
+            if keys:
+                if other_workers:
+                    logger.info("Moving %d keys to other workers", len(keys))
+                    # Do not provide workers explicitly but let the replicate figure out what's still active when
+                    # it is actually called.
+                    await self.replicate(keys=keys, n=1, delete=False)
+                else:
+                    return {}
+            logger.info(
+                "No keys to remove %s or no more workers left %s",
+                len(keys),
+                len(other_workers),
             )
-            # TODO: Do I need to lock here? replicate can call it on its own
-            async with self._lock if lock else empty_context:
-                # Keys orphaned by retiring those workers
-                keys = set.union(*[w.has_what for w in workers])
-                keys = {ts.key for ts in keys if ts.who_has.issubset(workers)}
+            import ipdb
 
-                other_workers = self.active - workers
-                if keys:
-                    if other_workers:
-                        logger.info("Moving %d keys to other workers", len(keys))
-                        # Do not provide workers explicitly but let the replicate figure out what's still active when
-                        # it is actually called.
-                        await self.replicate(
-                            keys=keys, n=1, delete=False, lock=False,
-                        )
-                    else:
-                        return {}
-
-            worker_keys = {ws.address: ws.identity() for ws in workers}
+            ipdb.set_trace()
+            worker_keys = {ws.address: ws.identity() for ws in workers_to_retire}
             if close_workers and worker_keys:
                 logger.info("Closing workers %d", len(worker_keys))
                 await asyncio.gather(
@@ -4005,7 +4007,10 @@ class Scheduler(ServerNode):
 
         if ts.dependencies or valid_workers is not True:
             worker = decide_worker(
-                ts, self.active, valid_workers, partial(self.worker_objective, ts),
+                ts,
+                self.active.values(),
+                valid_workers,
+                partial(self.worker_objective, ts),
             )
         elif self.idle:
             if len(self.idle) < 20:  # smart but linear in small case
@@ -4014,9 +4019,9 @@ class Scheduler(ServerNode):
                 worker = self.idle[self.n_tasks % len(self.idle)]
         else:
             if len(self.workers) < 20:  # smart but linear in small case
-                worker = min(self.active, key=operator.attrgetter("occupancy"))
+                worker = min(self.active.values(), key=operator.attrgetter("occupancy"))
             else:  # dumb but fast in large case
-                worker = list(self.active)[self.n_tasks % len(self.workers)]
+                worker = list(self.active.values())[self.n_tasks % len(self.workers)]
 
         if self.validate:
             assert worker is None or isinstance(worker, WorkerState), (
@@ -4839,7 +4844,7 @@ class Scheduler(ServerNode):
         """
         s = True
         if len(self.active) != len(self.workers):
-            s = self.active
+            s = set(self.active.values())
 
         if ts.worker_restrictions:
             ss = {
@@ -4885,7 +4890,7 @@ class Scheduler(ServerNode):
         if s is True:
             return s
         else:
-            return s & self.active
+            return s & set(self.active.values())
 
     def consume_resources(self, ts, ws):
         if ts.resource_restrictions:
@@ -4954,7 +4959,7 @@ class Scheduler(ServerNode):
         Takes a list of worker addresses or hostnames.
         Returns a list of all worker addresses that match
         """
-        active_addresses = {ws.address for ws in self.active}
+        active_addresses = set(self.active)
         if workers is None:
             return list(active_addresses)
 
@@ -5217,8 +5222,8 @@ class Scheduler(ServerNode):
             next_time = timedelta(seconds=DELAY)
 
             if self.proc.cpu_percent() < 50:
-                workers = list(self.active)
-                for i in range(len(workers)):
+                workers = list(self.active.values())
+                for _ in range(len(workers)):
                     ws = workers[worker_index % len(workers)]
                     worker_index += 1
                     try:
@@ -5266,7 +5271,7 @@ class Scheduler(ServerNode):
 
     def check_worker_ttl(self):
         now = time()
-        for ws in self.active:
+        for ws in self.active.values():
             if ws.last_seen < now - self.worker_ttl:
                 logger.warning(
                     "Worker failed to heartbeat within %s seconds. Closing: %s",
@@ -5276,7 +5281,7 @@ class Scheduler(ServerNode):
                 self.remove_worker(address=ws.address)
 
     def check_idle(self):
-        if any(ws.processing for ws in self.active):
+        if any(ws.processing for ws in self.active.values()):
             return
         if self.unrunnable:
             return
@@ -5321,7 +5326,7 @@ class Scheduler(ServerNode):
 
         # Avoid a few long tasks from asking for many cores
         tasks_processing = 0
-        for ws in self.active:
+        for ws in self.active.values():
             tasks_processing += len(ws.processing)
 
             if tasks_processing > cpu:
@@ -5334,7 +5339,7 @@ class Scheduler(ServerNode):
 
         # Memory
         limit_bytes = {addr: ws.memory_limit for addr, ws in self.workers.items()}
-        worker_bytes = [ws.nbytes for ws in self.active]
+        worker_bytes = [ws.nbytes for ws in self.active.values()]
         limit = sum(limit_bytes.values())
         total = sum(worker_bytes)
         if total > 0.6 * limit:

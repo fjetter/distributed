@@ -724,45 +724,45 @@ async def test_retire_workers(c, s, a, b):
     assert not workers
 
 
-@gen_cluster(client=True, timeout=1000)
+@gen_cluster(
+    client=True, config={"distributed.scheduler.work-stealing-interval": "10ms"},
+)
 async def test_retire_workers_steal_tasks(c, s, a, b):
-    futures = c.map(slowinc, range(100))
-    while not b.data:
-        await asyncio.sleep(0.01)
+    num_to_generate = 100
+    futures = c.map(slowinc, range(num_to_generate))
+    # Give both workers time to produce data
+    await asyncio.sleep(0.1)
 
     a_orig_tasks = len(a.tasks)
     b_orig_tasks = len(b.tasks)
-
-    retire = s.retire_workers(workers=[b.address], remove=False)
+    assert a_orig_tasks > 1
+    assert b_orig_tasks > 1
 
     # The lock is used to restrict access to the replication which will
-    # artificially "slow down by acquiring the lock" here
-    acquire_lock = await s._lock.acquire()
+    # cause the retirement ultimately time out (similar to slow connections)
+    async with s._lock:
+        retire = s.retire_workers(workers=[b.address], remove=False)
 
-    async def emulate_slow_replication(s, a, b):
-        """
-        This coroutine is called "simultaneously" to allow inspection of the
-        state wihle the retirement coroutine is executed.
-        This assumes that retirement will release control to the event loop
-        every now and then (e.g. to communicate).
-        After a period of time this is used to release the lock and allow the
-        replication to proceed.
-        """
-        while len(s.active) == 2:
-            await asyncio.sleep(0.01)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(retire, timeout=1)
+
         assert b.paused
-        assert a.address in {w.address for w in s.active}
-        assert b.address not in {w.address for w in s.active}
-        await asyncio.sleep(2)
-        s._lock.release()
+        assert a.address in set(s.active)
+        assert b.address not in set(s.active)
 
+    active_address = set(s.active)
+
+    # Since the retirement failed, both workers are still there
+    # but not active anymore
+    assert a.address in s.workers
     assert b.address in s.workers
-
-    await asyncio.wait([retire, emulate_slow_replication(s, a, b)])
-    active_address = {ws.address for ws in s.active}
 
     assert a.address in active_address
     assert b.address not in active_address
+
+    # All tasks on b should be flagged as stealable. Give the workstealing some
+    # time to do its thing
+    await asyncio.sleep(0.1)
 
     a_new_tasks = len(a.tasks)
     b_new_tasks = len(b.tasks)
@@ -772,14 +772,18 @@ async def test_retire_workers_steal_tasks(c, s, a, b):
     assert b_new_tasks < b_orig_tasks
 
     task_still_on_b = b.tasks
+    assert task_still_on_b
+    # Now we want to ensure that whatever tasks are left on B are not flagged as
+    # suspicious once we close it hard.
     await b.close()
-    await asyncio.sleep(0.1)
 
     for key in task_still_on_b:
         assert s.tasks[key].suspicious == 0
 
+    # After all that happened, we want to ensure that our results are actually
+    # still there and as expected
     results = await c.gather(futures)
-    assert results == list(range(1, 101))
+    assert results == list(range(1, num_to_generate + 1))
 
 
 @gen_cluster(client=True)

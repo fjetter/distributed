@@ -35,13 +35,14 @@ class WorkStealing(SchedulerPlugin):
         self.cost_multipliers = [1 + 2 ** (i - 6) for i in range(15)]
         self.cost_multipliers[0] = 1
 
-        for worker in scheduler.workers:
+        for worker in scheduler.active:
             self.add_worker(worker=worker)
 
         callback_time = parse_timedelta(
             dask.config.get("distributed.scheduler.work-stealing-interval"),
             default="ms",
         )
+
         # `callback_time` is in milliseconds
         pc = PeriodicCallback(callback=self.balance, callback_time=callback_time * 1000)
         self._pc = pc
@@ -224,8 +225,8 @@ class WorkStealing(SchedulerPlugin):
 
             # One of the pair has left, punt and reschedule
             if (
-                thief.address not in self.scheduler.workers
-                or victim.address not in self.scheduler.workers
+                thief.address not in self.scheduler.active
+                or victim.address not in self.scheduler.active
             ):
                 self.scheduler.reschedule(key)
                 return
@@ -308,14 +309,15 @@ class WorkStealing(SchedulerPlugin):
             i = 0
             idle = s.idle
             saturated = s.saturated
-            if not idle or len(idle) == len(s.workers):
+
+            if (not idle or len(idle) == len(s.workers)) and (s.active != s.workers):
                 return
 
             log = []
             start = time()
 
             if not s.saturated:
-                saturated = topk(10, s.workers.values(), key=combined_occupancy)
+                saturated = topk(10, s.active.values(), key=combined_occupancy)
                 saturated = [
                     ws
                     for ws in saturated

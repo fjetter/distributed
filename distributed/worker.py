@@ -1096,6 +1096,8 @@ class Worker(ServerNode):
 
     async def prepare_retirement(self):
         self.status = "closing-gracefully"
+        self.periodic_callbacks["memory"].stop()
+        self.paused = True
 
     async def close(
         self, report=True, timeout=10, nanny=True, executor_wait=True, safe=False
