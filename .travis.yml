@@ -6,6 +6,7 @@ dist: trusty
 
 env:
   matrix:
+    - PYTHON=3.6 TESTS=true COVERAGE=true PACKAGES="lz4" TORNADO=6 CRICK=true
     - PYTHON=3.6 TESTS=true COVERAGE=true PACKAGES="lz4" TORNADO=5 CRICK=true
     - PYTHON=3.7 TESTS=true PACKAGES="python-snappy python-blosc" TORNADO=6
     - PYTHON=3.8 TESTS=true PACKAGES="python-snappy python-blosc" TORNADO=6
