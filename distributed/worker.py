@@ -1138,6 +1138,9 @@ class Worker(ServerNode):
             for pc in self.periodic_callbacks.values():
                 pc.stop()
             with suppress(EnvironmentError, TimeoutError):
+                if self._client:
+                    await self._client.close()
+
                 if report and self.contact_address is not None:
                     await asyncio.wait_for(
                         self.scheduler.unregister(
