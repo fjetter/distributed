@@ -2191,7 +2191,9 @@ class Worker(ServerNode):
             raise
 
     def steal_request(self, key):
-        state = self.tasks[key].state
+        # If key was already released, this is no longer part of the tasks dict.
+        # This will show up as "already computing" on the other end
+        state = self.tasks.get(key, None)
 
         response = {"op": "steal-response", "key": key, "state": state}
         self.batched_stream.send(response)
