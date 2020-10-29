@@ -279,7 +279,7 @@ async def connect(
     # Prefer multiple small attempts than one long attempt. This should protect
     # primarily from DNS race conditions
     # gh3104, gh4176, gh4167
-    intermediate_cap = timeout / 5
+    intermediate_cap = timeout / 3
     active_exception = None
     while time_left() > 0:
         try:
@@ -296,7 +296,7 @@ async def connect(
 
             # The intermediate capping is mostly relevant for the initial
             # connect. Afterwards we should be more forgiving
-            intermediate_cap = intermediate_cap * 1.5
+            intermediate_cap = timeout
             # FullJitter see https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
 
             upper_cap = min(time_left(), backoff_base * (2 ** attempt))
