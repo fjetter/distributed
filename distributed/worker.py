@@ -1540,7 +1540,7 @@ class Worker(ServerNode):
             if not ts.who_has:
                 if ts.key not in self._missing_dep_flight:
                     self._missing_dep_flight.add(ts.key)
-                    self.loop.add_callback(self.handle_missing_dep, ts)
+                    self.loop.add_callback(self.handle_missing_dep, ts.key)
             for dependent in ts.dependents:
                 if dependent.state == "waiting":
                     if remove:  # try a new worker immediately
