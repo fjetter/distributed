@@ -105,8 +105,7 @@ class TaskState:
         The priority this task given by the scheduler.  Determines run order.
     * **state**: ``str``
         The current state of the task. One of ["waiting", "ready", "executing",
-        "memory", "flight", "executing", "error", "long-running",
-        "rescheduled", "error"]
+        "memory", "flight", "error", "long-running", "rescheduled"]
     * **who_has**: ``set(worker)``
         Workers that we believe have this data
     * **coming_from**: ``str``
@@ -2076,10 +2075,9 @@ class Worker(ServerNode):
 
                     if not busy and d in data:
                         self.transition(ts, "memory", value=data[d])
-                    elif ts is None or ts.state == "executing":
-                        self.release_key(d)
+                    elif ts is None:
                         continue
-                    elif ts.state not in ("ready", "memory"):
+                    elif ts.state != "memory":
                         self.transition(ts, "waiting", worker=worker, remove=not busy)
 
                     if not busy and d not in data and ts.dependents:
@@ -2259,32 +2257,6 @@ class Worker(ServerNode):
             del ts
         except CommClosedError:
             pass
-        except Exception as e:
-            logger.exception(e)
-            if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
-            raise
-
-    def rescind_key(self, key):
-        try:
-            if self.tasks[key].state not in PENDING:
-                return
-
-            ts = self.tasks.pop(key)
-
-            # Task has been rescinded
-            # For every task that it required
-            for dependency in ts.dependencies:
-                # Remove it as a dependent
-                dependency.dependents.remove(key)
-                # If the dependent is now without purpose (no dependencies), remove it
-                if not dependency.dependents:
-                    self.release_key(
-                        dependency.key, reason="All dependent keys rescinded"
-                    )
-
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
