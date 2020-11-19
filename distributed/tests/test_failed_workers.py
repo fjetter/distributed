@@ -1,7 +1,6 @@
 import asyncio
 from contextlib import suppress
 import os
-import random
 from time import sleep
 
 import pytest
@@ -322,7 +321,7 @@ async def test_broken_worker_during_computation(c, s, a, b):
         await asyncio.sleep(0.01)
         assert time() < start + 5
 
-    N = 256
+    N = 128
     expected_result = N * (N + 1) // 2
     i = 0
     L = c.map(inc, range(N), key=["inc-%d-%d" % (i, j) for j in range(N)])
@@ -334,18 +333,17 @@ async def test_broken_worker_during_computation(c, s, a, b):
             key=["add-%d-%d" % (i, j) for j in range(len(L) // 2)]
         )
 
-    await asyncio.sleep(random.random() / 20)
+    await asyncio.sleep(0.02)
     with suppress(CommClosedError):  # comm will be closed abrupty
         await c._run(os._exit, 1, workers=[n.worker_address])
 
-    await asyncio.sleep(random.random() / 20)
+    await asyncio.sleep(0.02)
+
+    # Assert that we actually killed / lost one of the tasks
+    assert any(map(lambda t: t.suspicious, s.tasks.values()))
+
     while len(s.workers) < 3:
         await asyncio.sleep(0.01)
-
-    with suppress(
-        CommClosedError, EnvironmentError
-    ):  # perhaps new worker can't be contacted yet
-        await c._run(os._exit, 1, workers=[n.worker_address])
 
     [result] = await c.gather(L)
     assert isinstance(result, int)
