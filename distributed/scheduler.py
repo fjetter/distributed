@@ -2728,7 +2728,14 @@ class Scheduler(ServerNode):
                 ts._who_has,
             )
             if ws not in ts._who_has:
-                self.worker_send(worker, {"op": "release-task", "key": key})
+                self.worker_send(
+                    worker,
+                    {
+                        "op": "release-task",
+                        "key": key,
+                        "reason": "stimulus task finished",
+                    },
+                )
             recommendations = {}
 
         return recommendations
@@ -5213,7 +5220,12 @@ class Scheduler(ServerNode):
                 assert self.tasks[key].state == "processing"
 
             self._remove_from_processing(
-                ts, send_worker_msg={"op": "release-task", "key": key}
+                ts,
+                send_worker_msg={
+                    "op": "release-task",
+                    "key": key,
+                    "reason": "transition released",
+                },
             )
 
             ts.state = "released"
