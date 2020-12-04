@@ -1783,3 +1783,32 @@ async def test_executor_offload(cleanup, monkeypatch):
                     return threading.get_ident() == x._thread_ident
 
                 assert await c.submit(f, x)
+
+
+@gen_cluster(client=True)
+async def test_get_data_faulty_dep(c, s, a, b):
+    """This test creates a broken dependency and forces serialization by
+    requiring it to be submitted to another worker. The computation should
+    eventually finish by flagging the dep as bad and raise an appropriate
+    exception.
+    """
+
+    class BrokenDeserialization:
+        def __setstate__(self, *state):
+            raise AttributeError()
+
+        def __getstate__(self, *args):
+            return ""
+
+    def create():
+        return BrokenDeserialization()
+
+    def collect(*args):
+        return args
+
+    fut1 = c.submit(create, workers=[a.name])
+
+    fut2 = c.submit(collect, fut1, workers=[b.name])
+
+    with pytest.raises(ValueError, match="Could not find dependent create-"):
+        await fut2.result()

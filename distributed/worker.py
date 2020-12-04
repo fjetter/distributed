@@ -414,7 +414,6 @@ class Worker(ServerNode):
         )
         self.total_comm_nbytes = 10e6
         self.comm_nbytes = 0
-        self._missing_dep_flight = set()
 
         self.threads = dict()
 
@@ -1347,6 +1346,16 @@ class Worker(ServerNode):
             compressed = await comm.write(msg, serializers=serializers)
             response = await comm.read(deserializers=serializers)
             assert response == "OK", response
+
+        except CommClosedError:
+            logger.exception(
+                "Other end hung up during get_data with %s -> %s",
+                self.address,
+                who,
+                exc_info=True,
+            )
+            comm.abort()
+            raise
         except EnvironmentError:
             logger.exception(
                 "failed during get data with %s -> %s", self.address, who, exc_info=True
@@ -1573,10 +1582,6 @@ class Worker(ServerNode):
                 except KeyError:
                     pass
 
-            if not ts.who_has:
-                if ts.key not in self._missing_dep_flight:
-                    self._missing_dep_flight.add(ts.key)
-                    self.loop.add_callback(self.handle_missing_dep, ts)
             for dependent in ts.dependents:
                 if dependent.state == "waiting":
                     if remove:  # try a new worker immediately
@@ -1841,14 +1846,7 @@ class Worker(ServerNode):
                 missing_deps = {dep for dep in deps if not dep.who_has}
                 if missing_deps:
                     logger.info("Can't find dependencies for key %s", key)
-                    missing_deps2 = {
-                        dep
-                        for dep in missing_deps
-                        if dep.key not in self._missing_dep_flight
-                    }
-                    for dep in missing_deps2:
-                        self._missing_dep_flight.add(dep.key)
-                    self.loop.add_callback(self.handle_missing_dep, *missing_deps2)
+                    self.loop.add_callback(self.handle_missing_dep, *missing_deps)
 
                     deps = [dep for dep in deps if dep not in missing_deps]
 
@@ -2136,7 +2134,6 @@ class Worker(ServerNode):
 
                 if not busy:
                     self.repetitively_busy = 0
-                    self.ensure_communicating()
                 else:
                     # Exponential backoff to avoid hammering scheduler/worker
                     self.repetitively_busy += 1
@@ -2144,7 +2141,7 @@ class Worker(ServerNode):
 
                     # See if anyone new has the data
                     await self.query_who_has(dep.key)
-                    self.ensure_communicating()
+                self.ensure_communicating()
 
     def bad_dep(self, dep):
         exc = ValueError(
@@ -2164,7 +2161,7 @@ class Worker(ServerNode):
             if not deps:
                 return
 
-            for dep in deps:
+            for dep in list(deps):
                 if dep.suspicious_count > 5:
                     deps.remove(dep)
                     self.bad_dep(dep)
@@ -2177,10 +2174,7 @@ class Worker(ServerNode):
                     dep.key,
                     dep.suspicious_count,
                 )
-
-            who_has = await retry_operation(
-                self.scheduler.who_has, keys=list(dep.key for dep in deps)
-            )
+            who_has = await self.query_who_has(list(dep.key for dep in deps))
             who_has = {k: v for k, v in who_has.items() if v}
             self.update_who_has(who_has)
             for dep in deps:
@@ -2188,7 +2182,6 @@ class Worker(ServerNode):
 
                 if not who_has.get(dep.key):
                     self.log.append((dep.key, "no workers found", dep.dependents))
-                    self.release_key(dep.key)
                 else:
                     self.log.append((dep.key, "new workers found"))
                     for dependent in dep.dependents:
@@ -2204,12 +2197,6 @@ class Worker(ServerNode):
             else:
                 raise
         finally:
-            try:
-                for dep in deps:
-                    self._missing_dep_flight.remove(dep.key)
-            except KeyError:
-                pass
-
             self.ensure_communicating()
 
     async def query_who_has(self, *deps):
@@ -2265,15 +2252,6 @@ class Worker(ServerNode):
                     logger.error("Tried to delete %s but no file found", exc_info=True)
             if key in self.actors and not ts.dependents:
                 del self.actors[key]
-
-            # for any dependencies of key we are releasing remove task as dependent
-            for dependency in ts.dependencies:
-                dependency.dependents.discard(ts)
-                if not dependency.dependents and dependency.state in (
-                    "waiting",
-                    "flight",
-                ):
-                    self.release_key(dependency.key)
 
             for worker in ts.who_has:
                 self.has_what[worker].discard(ts.key)
@@ -2949,7 +2927,6 @@ class Worker(ServerNode):
                     assert (
                         ts_wait.state == "flight"
                         or ts_wait.state == "waiting"
-                        or ts.wait.key in self._missing_dep_flight
                         or ts_wait.who_has.issubset(self.in_flight_workers)
                     )
                 if ts.state == "memory":
@@ -3260,7 +3237,7 @@ async def get_data_from_worker(
             except KeyError:
                 raise ValueError("Unexpected response", response)
             else:
-                if status == "OK":
+                if not comm.closed() and status == "OK":
                     await comm.write("OK")
             return response
         finally:
