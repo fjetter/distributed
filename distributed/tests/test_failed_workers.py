@@ -98,22 +98,6 @@ async def test_gather_then_submit_after_failed_workers(c, s, w, x, y, z):
         assert result == [sum(map(inc, range(20)))]
 
 
-@gen_cluster(
-    client=True,
-    Worker=Nanny,
-    config={"distributed.comm.timeouts.connect": "1s"},
-)
-async def test_gather_then_submit_after_failed_workers_deadlock(c, s, a, b):
-    L = c.map(inc, range(10), workers=[a.name], allow_other_workers=True)
-    await wait(L)
-
-    total = c.submit(sum, L, workers=[b.name])
-    a.process.process._process.terminate()
-
-    result = await c.gather(total)
-    assert result == sum(map(inc, range(10)))
-
-
 @gen_cluster(Worker=Nanny, timeout=60, client=True)
 async def test_failed_worker_without_warning(c, s, a, b):
     L = c.map(inc, range(10))
