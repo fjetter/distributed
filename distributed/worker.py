@@ -1602,9 +1602,6 @@ class Worker(ServerNode):
                         self.data_needed.appendleft(dependent.key)
                     else:  # worker was probably busy, wait a while
                         self.data_needed.append(dependent.key)
-
-            if not ts.dependents:
-                self.release_key(ts.key)
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
@@ -2130,9 +2127,6 @@ class Worker(ServerNode):
 
                     if not busy and d in data:
                         self.transition(ts, "memory", value=data[d])
-                    elif ts is None or ts.state == "executing":
-                        self.release_key(d)
-                        continue
                     elif ts.state not in ("ready", "memory"):
                         self.transition(ts, "waiting", worker=worker, remove=not busy)
 
@@ -2170,7 +2164,6 @@ class Worker(ServerNode):
         self.release_key(dep.key)
 
     async def handle_missing_dep(self, *deps, **kwargs):
-        print("HANDLE MISSING DEPS")
         try:
             self.log.append(("handle-missing", deps))
             deps = {dep for dep in deps if dep.dependents}
