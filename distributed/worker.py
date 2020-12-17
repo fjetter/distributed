@@ -1452,6 +1452,7 @@ class Worker(ServerNode):
         actor=False,
         **kwargs2,
     ):
+        runspec = SerializedTask(function, args, kwargs, task)
         try:
             if key in self.tasks:
                 ts = self.tasks[key]
@@ -1461,19 +1462,30 @@ class Worker(ServerNode):
                         "Asked to compute pre-existing result: %s: %s", key, ts.state
                     )
                     self.send_task_state_to_scheduler(ts)
+                    # FIXME: Can we pull this off without a return to ensure
+                    # that we do not miss anything following?
                     return
                 if ts.state in IN_PLAY:
-                    return
+                    # XXX I believe we only require this special treatment in
+                    # case we're already executing or in memory to avoid
+                    # resetting / aborting the computation. Then again, if the
+                    # execution is ongoing, finishing it _should_ transfer it to
+                    # memory regardless of the start state, shouldn't it?
+
+                    # State waiting is ambiguous since it is used for
+                    # dependencies which are waiting to be fetched (no runspec)
+                    # and for tasks ready to be computed (with runspec)
+                    if ts.state == "waiting":
+                        ts.runspec = runspec
                 if ts.state == "erred":
                     ts.exception = None
                     ts.traceback = None
                 else:
-                    ts.state = "waiting"
+                    self.transition(ts, "waiting", runspec=runspec)
             else:
                 self.log.append((key, "new"))
-                self.tasks[key] = ts = TaskState(
-                    key=key, runspec=SerializedTask(function, args, kwargs, task)
-                )
+                self.tasks[key] = ts = TaskState(key=key, runspec=runspec)
+                # Transition new->waiting not implemented
                 ts.state = "waiting"
 
             if priority is not None:
@@ -1485,6 +1497,7 @@ class Worker(ServerNode):
 
             ts.priority = priority
             ts.duration = duration
+            ts.runspec = runspec
             if resource_restrictions:
                 ts.resource_restrictions = resource_restrictions
 
@@ -1568,13 +1581,14 @@ class Worker(ServerNode):
                 pdb.set_trace()
             raise
 
-    def transition_flight_waiting(self, ts, worker=None, remove=True):
+    def transition_flight_waiting(self, ts, worker=None, remove=True, runspec=None):
         try:
             if self.validate:
                 assert ts.state == "flight"
 
             self.in_flight_tasks -= 1
             ts.coming_from = None
+            ts.runspec = runspec
             if remove:
                 try:
                     ts.who_has.remove(worker)
@@ -2096,6 +2110,7 @@ class Worker(ServerNode):
                 self.log.append(("receive-dep-failed", worker))
                 for d in self.has_what.pop(worker):
                     self.tasks[d].who_has.remove(worker)
+                raise
 
             except Exception as e:
                 logger.exception(e)
@@ -2155,8 +2170,9 @@ class Worker(ServerNode):
         self.release_key(dep.key)
 
     async def handle_missing_dep(self, *deps, **kwargs):
-        self.log.append(("handle-missing", deps))
+        print("HANDLE MISSING DEPS")
         try:
+            self.log.append(("handle-missing", deps))
             deps = {dep for dep in deps if dep.dependents}
             if not deps:
                 return
@@ -2187,16 +2203,8 @@ class Worker(ServerNode):
                     for dependent in dep.dependents:
                         if dependent.key in dep.waiting_for_data:
                             self.data_needed.append(dependent.key)
-
-        except Exception:
-            logger.error("Handle missing dep failed, retrying", exc_info=True)
-            retries = kwargs.get("retries", 5)
-            self.log.append(("handle-missing-failed", retries, deps))
-            if retries > 0:
-                await self.handle_missing_dep(*deps, retries=retries - 1)
-            else:
-                raise
         finally:
+            await self.ensure_computing()
             self.ensure_communicating()
 
     async def query_who_has(self, *deps):
@@ -2316,8 +2324,8 @@ class Worker(ServerNode):
 
     # FIXME: this breaks if changed to async def...
     # xref: https://github.com/dask/distributed/issues/3938
-    @gen.coroutine
-    def executor_submit(self, key, function, args=(), kwargs=None, executor=None):
+    # @gen.coroutine
+    async def executor_submit(self, key, function, args=(), kwargs=None, executor=None):
         """Safely run function in thread pool executor
 
         We've run into issues running concurrent.future futures within
@@ -2337,17 +2345,15 @@ class Worker(ServerNode):
         if ts is not None:
             ts.start_time = time()
         pc.start()
-        try:
-            yield future
-        finally:
-            pc.stop()
-            if ts is not None:
-                ts.stop_time = time()
 
-        result = future.result()
+        while not future.done():
+            await asyncio.sleep(0.01)
 
-        # logger.info("Finish job %d, %s", i, key)
-        raise gen.Return(result)
+        pc.stop()
+        if ts is not None:
+            ts.stop_time = time()
+
+        return future.result()
 
     def run(self, comm, function, args=(), wait=True, kwargs=None):
         return run(self, comm, function=function, args=args, kwargs=kwargs, wait=wait)
@@ -2429,7 +2435,9 @@ class Worker(ServerNode):
         return True
 
     async def _maybe_deserialize_task(self, ts):
+        assert ts.runspec is not None
         if not isinstance(ts.runspec, SerializedTask):
+            # FIXME: What is this case??
             return ts.runspec
         try:
             start = time()
@@ -2466,11 +2474,9 @@ class Worker(ServerNode):
                     continue
                 if self.meets_resource_constraints(key):
                     self.constrained.popleft()
-                    try:
-                        # Ensure task is deserialized prior to execution
-                        ts.runspec = await self._maybe_deserialize_task(ts)
-                    except Exception:
-                        continue
+                    # FIXME: Should this be part of the transition step?
+                    # Ensure task is deserialized prior to execution
+                    ts.runspec = await self._maybe_deserialize_task(ts)
                     self.transition(ts, "executing")
                 else:
                     break
@@ -2485,11 +2491,9 @@ class Worker(ServerNode):
                 elif ts.key in self.data:
                     self.transition(ts, "memory")
                 elif ts.state in READY:
-                    try:
-                        # Ensure task is deserialized prior to execution
-                        ts.runspec = await self._maybe_deserialize_task(ts)
-                    except Exception:
-                        continue
+                    # FIXME: Should this be part of the transition step?
+                    # Ensure task is deserialized prior to execution
+                    ts.runspec = await self._maybe_deserialize_task(ts)
                     self.transition(ts, "executing")
         except Exception as e:
             logger.exception(e)
@@ -2507,8 +2511,12 @@ class Worker(ServerNode):
             if key not in self.tasks:
                 return
             ts = self.tasks[key]
-            if ts.state != "executing" or ts.runspec is None:
-                return
+            if ts.state != "executing":
+                raise RuntimeError(
+                    f"Trying to execute a task {ts} which is not in executing state anymore"
+                )
+            if ts.runspec is None:
+                raise RuntimeError(f"No runspec available for task {ts}")
             if self.validate:
                 assert not ts.waiting_for_data
                 assert ts.state == "executing"
@@ -2860,6 +2868,7 @@ class Worker(ServerNode):
         assert ts.state == "executing"
         assert ts.key not in self.data
         assert not ts.waiting_for_data
+        assert ts.runspec is not None
         assert all(
             dep.key in self.data or dep.key in self.actors for dep in ts.dependencies
         )

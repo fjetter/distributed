@@ -98,6 +98,22 @@ async def test_gather_then_submit_after_failed_workers(c, s, w, x, y, z):
         assert result == [sum(map(inc, range(20)))]
 
 
+@gen_cluster(
+    client=True,
+    Worker=Nanny,
+    config={"distributed.comm.timeouts.connect": "1s"},
+)
+async def test_gather_then_submit_after_failed_workers_deadlock(c, s, a, b):
+    L = c.map(inc, range(10), workers=[a.name], allow_other_workers=True)
+    await wait(L)
+
+    total = c.submit(sum, L, workers=[b.name])
+    a.process.process._process.terminate()
+
+    result = await c.gather(total)
+    assert result == sum(map(inc, range(10)))
+
+
 @gen_cluster(Worker=Nanny, timeout=60, client=True)
 async def test_failed_worker_without_warning(c, s, a, b):
     L = c.map(inc, range(10))
@@ -416,7 +432,6 @@ async def test_restart_timeout_on_long_running_task(c, s, a):
     assert "timeout" not in text.lower()
 
 
-@pytest.mark.slow
 @gen_cluster(client=True, scheduler_kwargs={"worker_ttl": "500ms"})
 async def test_worker_time_to_live(c, s, a, b):
     from distributed.scheduler import heartbeat_interval
@@ -434,4 +449,33 @@ async def test_worker_time_to_live(c, s, a, b):
         await asyncio.sleep(interval)
         assert time() < start + interval + 0.1
 
-    set(s.workers) == {b.address}
+    assert set(s.workers) == {b.address}
+
+
+@gen_cluster(client=True)
+async def test_get_data_faulty_dep(c, s, a, b):
+    """This test creates a broken dependency and forces serialization by
+    requiring it to be submitted to another worker. The computation should
+    eventually finish by flagging the dep as bad and raise an appropriate
+    exception.
+    """
+
+    class BrokenDeserialization:
+        def __setstate__(self, *state):
+            raise AttributeError()
+
+        def __getstate__(self, *args):
+            return ""
+
+    def create():
+        return BrokenDeserialization()
+
+    def collect(*args):
+        return args
+
+    fut1 = c.submit(create, workers=[a.name])
+
+    fut2 = c.submit(collect, fut1, workers=[b.name])
+
+    with pytest.raises(ValueError, match="Could not find dependent create-"):
+        await fut2.result()
