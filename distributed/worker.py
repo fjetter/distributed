@@ -1342,6 +1342,11 @@ class Worker(ServerNode):
                     from .actor import Actor
 
                     data[k] = Actor(type(self.actors[k]), self.address, k)
+        if len(data) != len(keys):
+            logger.debug(
+                "Data request from %s but keys %s are not available."
+                % (who, set(keys) - set(data))
+            )
 
         msg = {"status": "OK", "data": {k: to_serialize(v) for k, v in data.items()}}
         nbytes = {k: self.tasks[k].nbytes for k in data if k in self.tasks}
@@ -1489,49 +1494,56 @@ class Worker(ServerNode):
             who_has = who_has or {}
 
             for dependency, workers in who_has.items():
-                if self.address in workers:
-                    logger.debug(
-                        f"Who has claims {self.name} would own data of {dependency} but this is untrue."
-                    )
-                    # workers = tuple(w_addr for w_addr in workers if w_addr != self.address)
                 if dependency not in self.tasks:
                     self.tasks[dependency] = dep_ts = TaskState(key=dependency)
                     dep_ts.state = "waiting"
+                    logger.debug(f"New dep {dep_ts}")
                     self.log.append((dependency, "new-dep", dep_ts.state))
+                    if dep_ts.key in self.data:
+                        dep_ts.state = "memory"
+                        logger.debug(
+                            "Encountered dependency %s which was in data but not tracked in tasks"
+                            % dep_ts.key
+                        )
+                        if self.validate:
+                            self.validate_task_memory(dep_ts)
                 else:
                     dep_ts = self.tasks[dependency]
+                    logger.debug(f"Known dep {dep_ts}")
                     self.log.append((dependency, "known-dep", dep_ts.state))
 
-                if dep_ts.state != "memory":
-                    logger.info(f"{dep_ts} not in memory")
-                    ts.waiting_for_data.add(dep_ts.key)
-                    self.waiting_for_data_count += 1
-
-                dep_ts.who_has.update(workers)
+                if self.address in workers and dep_ts.state != "memory":
+                    logger.debug(
+                        f"Who has claims Worker {self.name} would own data of {dependency} but this is untrue."
+                    )
+                if dep_ts.state not in "memory":
+                    if dep_ts.runspec is None:
+                        logger.info(f"Need to fetch {dep_ts}")
+                        ts.waiting_for_data.add(dep_ts.key)
+                        self.waiting_for_data_count += 1
+                    else:
+                        logger.info(f"Runspec for dep {dep_ts} known.")
 
                 ts.dependencies.add(dep_ts)
                 dep_ts.dependents.add(ts)
 
-                for worker in workers:
-                    self.has_what[worker].add(dep_ts.key)
-                    if dep_ts.state != "memory":
-                        self.pending_data_per_worker[worker].append(dep_ts.key)
+            self.update_who_has(who_has)
 
             if nbytes is not None:
                 for key, value in nbytes.items():
                     self.tasks[key].nbytes = value
 
             if ts.waiting_for_data:
-                self.data_needed.append(ts.key)
+                if ts.key not in self.data_needed:
+                    self.data_needed.append(ts.key)
+                else:
+                    logger.debug("Key %s already tracked in data_needed" % ts.key)
             else:
                 self.transition(ts, "ready")
             if self.validate:
                 if who_has:
                     assert all(self.tasks[dep] in ts.dependencies for dep in who_has)
-                    assert all(self.tasks[dep.key] for dep in ts.dependencies)
-                    for dependency in ts.dependencies:
-                        self.validate_task(dependency)
-                    self.validate_task(ts)
+                self.validate_state()
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
@@ -1550,8 +1562,6 @@ class Worker(ServerNode):
         state = func(ts, **kwargs)
         self.log.append((ts.key, start, state or finish))
         ts.state = state or finish
-        if self.validate:
-            self.validate_task(ts)
         self._notify_plugins("transition", ts.key, start, state or finish, **kwargs)
 
     def transition_waiting_flight(self, ts, worker=None):
@@ -1578,14 +1588,15 @@ class Worker(ServerNode):
 
             self.in_flight_tasks -= 1
             ts.coming_from = None
-            ts.runspec = runspec
+            ts.runspec = runspec or ts.runspec
 
             for dependent in ts.dependents:
                 if dependent.state == "waiting":
-                    if remove:  # try a new worker immediately
-                        self.data_needed.appendleft(dependent.key)
-                    else:  # worker was probably busy, wait a while
-                        self.data_needed.append(dependent.key)
+                    if dependent.key not in self.data_needed:
+                        if remove:  # try a new worker immediately
+                            self.data_needed.appendleft(dependent.key)
+                        else:  # worker was probably busy, wait a while
+                            self.data_needed.append(dependent.key)
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
@@ -1984,8 +1995,7 @@ class Worker(ServerNode):
                 pass
             if not dep.waiting_for_data:
                 self.transition(dep, "ready")
-        if self.validate:
-            self.validate_state()
+
         self.log.append((ts.key, "put-in-memory"))
 
     def select_keys_for_gather(self, worker, dep):
@@ -2133,18 +2143,11 @@ class Worker(ServerNode):
                     self.validate_state()
 
                 missing = set()
-                assert len(deps) == len(self.in_flight_workers[worker])
-                # We'll need to eventually empty the in_flight set but doing it
-                # task by task allows us to validate the state upon every
-                # transition. Ideally this would be handled by the transition
-                # but to do so, we'd need to pass on the worker to the
-                # transition function. However, the signature of the transition
-                # functino should ideally be deifned by the finish state and be
-                # independent from the start state. This is not the case for
-                # this transition and a refactor of in_flight_workers might be
-                # necessary first.
-                for d in list(self.in_flight_workers[worker]):
-                    self.in_flight_workers[worker].remove(d)
+
+                for d in self.in_flight_workers.pop(worker):
+                    if d not in self.tasks:
+                        logger.debug("Task %s already forgotten." % d)
+                        continue
                     assert isinstance(d, str)
                     ts = self.tasks[d]
                     # There is a race condition where the worker we're fetching
@@ -2156,16 +2159,28 @@ class Worker(ServerNode):
                         continue
                     if ts.key in data:
                         self.transition(ts, "memory", value=data[d])
+                    elif ts.state == "ready":
+                        if ts.runspec is not None:
+                            pass
+                            # This is encountered if the key is missing but was
+                            # already reassigned for computation on this worker
+                        else:
+                            raise RuntimeError("Encountered unexpected state")
                     else:
                         self.transition(ts, "waiting", worker=worker)
                         missing.add(ts)
-                del self.in_flight_workers[worker]
 
                 if self.validate:
                     self.validate_state()
                 if missing:
                     await self.handle_missing_dep(*missing, worker=worker)
-                    self.data_needed.append(cause)
+                    if cause not in self.data_needed:
+                        if self.validate:
+                            assert isinstance(cause, str)
+                            assert cause in self.tasks
+                        self.data_needed.append(cause)
+                    else:
+                        logger.debug("Key %s already in data_needed" % cause)
 
                 if self.validate:
                     self.validate_state()
@@ -2189,34 +2204,38 @@ class Worker(ServerNode):
         ts.traceback = msg["traceback"]
         self.transition(ts, "error")
 
-    async def handle_missing_dep(self, *deps, worker, **kwargs):
+    async def handle_missing_dep(self, *deps, worker):
         """In case a dependency is missing we'll sync up with the scheduler to
         confirm that our view of the world is accurate. If the scheudler has new
         information, we'll just try again. If the scheduler doesn't have new
         information, this means something is wrong with the world and we'll escalate to
         the scheduler and trigger a key state reset to recompute the key"""
         self.log.append(("handle-missing", deps))
-        logger.info(
-            f"Worker {self.name} - {self.address}  - Handle missing {deps} from worker {worker}"
+
+        deps2 = {
+            dep for dep in deps if dep.dependents and dep.state in ("flight", "waiting")
+        }
+        logger.debug(
+            "Worker %s - %s  - Handle missing %s from worker %s."
+            % (self.name, self.address, deps2, worker)
         )
-        deps = {dep for dep in deps if dep.dependents}
-        if not deps:
+        if not deps2:
             return
 
-        for dep in deps:
+        for dep in deps2:
             logger.info(
                 "Dependent not found: %s %s .  Asking scheduler",
                 dep.key,
                 dep.suspicious_count,
             )
         who_has = await retry_operation(
-            self.scheduler.who_has, keys={d.key for d in deps}
+            self.scheduler.who_has, keys={d.key for d in deps2}
         )
         who_has_2 = {k: v for k, v in who_has.items() if v}
 
         for task_key, task_who_has in who_has_2.items():
             ts = self.tasks[task_key]
-            deps.remove(ts)
+            deps2.remove(ts)
 
             if ts.who_has == set(task_who_has):
                 self.batched_stream.send(
@@ -2224,7 +2243,7 @@ class Worker(ServerNode):
                 )
                 self.transition(ts, "waiting", worker=worker)
         self.update_who_has(who_has)
-        for dep in deps:
+        for dep in deps2:
             self.batched_stream.send(
                 {"op": "missing-data", "errant_worker": worker, "key": dep.key}
             )
@@ -2243,11 +2262,14 @@ class Worker(ServerNode):
                 if not workers:
                     continue
 
+                dep_ts = self.tasks[dep]
                 old = self.tasks[dep].who_has
                 self.tasks[dep].who_has = set(workers)
 
                 for worker in workers:
                     self.has_what[worker].add(dep)
+                    if dep_ts.state != "memory":
+                        self.pending_data_per_worker[worker].append(dep_ts.key)
                 for worker in old - set(workers):
                     self.has_what[worker].discard(dep)
 
@@ -2287,6 +2309,7 @@ class Worker(ServerNode):
                 self.log.append((key, "release-key", {"cause": cause}))
             else:
                 self.log.append((key, "release-key"))
+            # FIXME: What happens to data entries without corresponding TaskState?
             if key in self.data and not ts.dependents:
                 try:
                     del self.data[key]
@@ -2903,8 +2926,6 @@ class Worker(ServerNode):
         )
 
     def validate_task_waiting(self, ts):
-        if not hasattr(self, "data"):
-            print("HOWWW???")
         assert ts.key not in self.data
         assert ts.state == "waiting"
         if ts.dependencies:
@@ -2917,6 +2938,9 @@ class Worker(ServerNode):
         assert ts.key in self.in_flight_workers[ts.coming_from]
 
     def validate_task(self, ts):
+        assert ts.key in self.tasks
+        for dependency in ts.dependencies:
+            dependency in self.tasks
         try:
             if ts.state == "memory":
                 self.validate_task_memory(ts)
@@ -2940,6 +2964,8 @@ class Worker(ServerNode):
         if self.status != Status.running:
             return
         try:
+            assert len(self.data_needed) == len(set(self.data_needed))
+            waiting_keys = set()
             for ts in self.tasks.values():
                 assert ts.state is not None
                 # check that worker has task
@@ -2961,11 +2987,17 @@ class Worker(ServerNode):
                         or ts_wait.state == "waiting"
                         or ts_wait.who_has.issubset(self.in_flight_workers)
                     )
+                    waiting_keys.add(key)
                 if ts.state == "memory":
                     assert isinstance(ts.nbytes, int)
                     assert not ts.waiting_for_data
                     assert ts.key in self.data or ts.key in self.actors
 
+            # FIXME: Tracking of waiting_for_data_count is broken. Most likely
+            # since tasks may be required/waited on by multiple tasks but the
+            # counter implementation doesn't reflect this, see Worker.transition_waiting_done
+            # assert self.waiting_for_data_count >= 0
+            # assert len(waiting_keys) == self.waiting_for_data_count
             for worker, keys in self.has_what.items():
                 for k in keys:
                     assert worker in self.tasks[k].who_has
