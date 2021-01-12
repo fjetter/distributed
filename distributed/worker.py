@@ -1518,7 +1518,7 @@ class Worker(ServerNode):
                         f"Who has claims Worker {self.name} would own data of {dependency} but this is false."
                     )
 
-                if dep_ts.state not in ("memory",) and dep_ts.runspec is None:
+                if dep_ts.state not in ("memory",):
                     ts.waiting_for_data.add(dep_ts.key)
                     self.waiting_for_data_count += 1
 
@@ -1534,9 +1534,14 @@ class Worker(ServerNode):
             if ts.waiting_for_data:
                 if ts.key not in self.data_needed:
                     self.data_needed.append(ts.key)
-            else:
+            elif ts.state == "waiting":
                 self.transition(ts, "ready")
+            else:
+                logger.warning(
+                    "Encountered unexpected state %s for task %s" % (ts.state, ts.key)
+                )
             if self.validate:
+                self.validate_state()
                 if who_has:
                     assert all(self.tasks[dep] in ts.dependencies for dep in who_has)
                     assert all(self.tasks[dep.key] for dep in ts.dependencies)
@@ -2559,8 +2564,8 @@ class Worker(ServerNode):
                 logger.critical("No runspec available for task %s." % ts)
                 return
             if self.validate:
-                assert not ts.waiting_for_data
                 assert ts.state == "executing"
+                self.validate_task(ts)
 
             function, args, kwargs = ts.runspec
 
@@ -2923,18 +2928,14 @@ class Worker(ServerNode):
         assert ts.key not in self.data
         assert not ts.waiting_for_data
         assert ts.runspec is not None
-        assert all(
-            dep.key in self.data or dep.key in self.actors for dep in ts.dependencies
-        )
+        assert all(dep.state == "memory" for dep in ts.dependencies)
 
     def validate_task_ready(self, ts):
         assert ts.key in pluck(1, self.ready)
         assert ts.key not in self.data
         assert ts.state != "executing"
         assert not ts.waiting_for_data
-        assert all(
-            dep.key in self.data or dep.key in self.actors for dep in ts.dependencies
-        )
+        assert all(dep.state == "memory" for dep in ts.dependencies)
 
     def validate_task_waiting(self, ts):
         assert ts.key not in self.data
@@ -2977,6 +2978,10 @@ class Worker(ServerNode):
             waiting_keys = set()
 
             assert self.executing_count >= 0
+
+            for k in self.data:
+                assert k in self.tasks
+                assert self.tasks[k].state == "memory"
 
             for ts in self.tasks.values():
                 assert ts.state is not None

@@ -4263,11 +4263,14 @@ class Scheduler(ServerNode):
         ws: WorkerState = self.workers[worker]
         for key in keys:
             ts: TaskState = self.tasks.get(key)
-            if ts is not None and ts._state == "memory":
-                if ts not in ws._has_what:
-                    ws._nbytes += ts.get_nbytes()
-                    ws._has_what.add(ts)
-                    ts._who_has.add(ws)
+            if ts is not None:
+                if ts._state == "memory":
+                    if ts not in ws._has_what:
+                        ws._nbytes += ts.get_nbytes()
+                        ws._has_what.add(ts)
+                        ts._who_has.add(ws)
+                else:
+                    self.transition(ts, "memory", worker=ws.address)
             else:
                 self.worker_send(
                     worker, {"op": "delete-data", "keys": [key], "report": False}
