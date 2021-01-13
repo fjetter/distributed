@@ -1701,9 +1701,10 @@ class Worker(ServerNode):
     def transition_ready_executing(self, ts):
         try:
             if self.validate:
+                assert ts.state in READY
+                self.validate_task(ts)
                 assert not ts.waiting_for_data
                 assert ts.key not in self.data
-                assert ts.state in READY
                 assert ts.key not in self.ready
                 assert all(
                     dep.key in self.data or dep.key in self.actors
@@ -2537,6 +2538,8 @@ class Worker(ServerNode):
                     except Exception:
                         continue
                     self.transition(ts, "executing")
+            if self.validate:
+                self.validate_state()
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
