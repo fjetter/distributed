@@ -1702,7 +1702,6 @@ class Worker(ServerNode):
         try:
             if self.validate:
                 assert ts.state in READY
-                self.validate_task(ts)
                 assert not ts.waiting_for_data
                 assert ts.key not in self.data
                 assert ts.key not in self.ready
@@ -1731,6 +1730,14 @@ class Worker(ServerNode):
         if value:
             self.put_key_in_memory(ts, value=value)
         self.send_task_state_to_scheduler(ts)
+
+        # FIXME: The scheduler method add-keys is flagged as deprecated but the
+        # ordinary submit task to scheduler may release keys if a key is
+        # submitted by an unexpected worker (i.e. enforce number of replicas to
+        # one). For this particular transition this might not be the correct
+        # choice since this is an "unnatural" transition in error or stealing
+        # scenarios
+        # self.batched_stream.send({"op": "add-keys", "keys": [ts.key]})
 
     def transition_ready_waiting(self, ts):
         """
@@ -1785,6 +1792,10 @@ class Worker(ServerNode):
                     ts.state = "error"
                     out = "error"
 
+                # Don't release the dependency keys, but do remove them from `dependents`
+                for dependency in ts.dependencies:
+                    dependency.dependents.discard(ts)
+                ts.dependencies.clear()
             if report and self.batched_stream and self.status == Status.running:
                 self.send_task_state_to_scheduler(ts)
             else:
@@ -2315,16 +2326,14 @@ class Worker(ServerNode):
             else:
                 self.log.append((key, "release-key"))
 
-            if key in self.data:
-                try:
-                    del self.data[key]
-                except FileNotFoundError:
-                    logger.error("Tried to delete %s but no file found", exc_info=True)
-            if key in self.actors:
-                del self.actors[key]
-
-            for worker in ts.who_has:
-                self.has_what[worker].discard(ts.key)
+            # for any dependencies of key we are releasing remove task as dependent
+            for dependency in ts.dependencies:
+                dependency.dependents.discard(ts)
+                if not dependency.dependents and dependency.state in (
+                    "waiting",
+                    "flight",
+                ):
+                    self.release_key(dependency.key)
 
             if key in self.threads:
                 del self.threads[key]
@@ -2341,8 +2350,25 @@ class Worker(ServerNode):
                 self.batched_stream.send({"op": "release", "key": key, "cause": cause})
 
             self._notify_plugins("release_key", key, ts.state, cause, reason, report)
-            if key in self.tasks:
-                self.tasks.pop(key)
+
+            if not ts.dependents:
+                # No more references. Delete task and data
+
+                for w in ts.who_has:
+                    self.has_what[w].discard(ts.key)
+
+                if key in self.data:
+                    try:
+                        del self.data[key]
+                    except FileNotFoundError:
+                        logger.error(
+                            "Tried to delete %s but no file found", exc_info=True
+                        )
+                if key in self.actors:
+                    del self.actors[key]
+
+                if key in self.tasks:
+                    self.tasks.pop(key)
             del ts
             if self.validate:
                 self.validate_state()
@@ -2999,7 +3025,10 @@ class Worker(ServerNode):
                     # dependency can still be in `memory` before GC grabs it...?
                     # Might need better bookkeeping
                     assert dep.state is not None
-                    assert ts in dep.dependents
+                    # FIXME GH4413 there is currently a reference counting in
+                    # place which removes dependents of tasks and only forgets
+                    # the task once the dependents are gone
+                    # assert ts in dep.dependents  # hit in test_clean_nbytes
                 for key in ts.waiting_for_data:
                     ts_wait = self.tasks[key]
                     assert ts_wait.state in PROCESSING, ts_wait
