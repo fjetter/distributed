@@ -3373,7 +3373,7 @@ class Scheduler(ServerNode):
         self.log.append(("missing", key, errant_worker))
 
         ts: TaskState = self.tasks.get(key)
-        if ts is None or not ts._who_has:
+        if ts is None:
             logger.info("Missing data key not known %s" % key)
             return
         if errant_worker in self.workers:
