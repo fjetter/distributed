@@ -4980,7 +4980,7 @@ class Scheduler(ServerNode):
                     ws,
                     key,
                 )
-                return {}
+                # return {}
 
             if startstops:
                 L = list()

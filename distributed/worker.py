@@ -2253,10 +2253,9 @@ class Worker(ServerNode):
 
         for dep in deps2:
             logger.info(
-                "Dependent not found: %s %s .  Asking scheduler",
+                "Dependent not found: %s on %s .  Asking scheduler",
                 dep.key,
-                # FIXME: suspicious count not used atm
-                dep.suspicious_count,
+                worker,
             )
         who_has = await retry_operation(
             self.scheduler.who_has,
