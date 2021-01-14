@@ -454,8 +454,8 @@ class Worker(ServerNode):
             ("ready", "executing"): self.transition_ready_executing,
             ("ready", "memory"): self.transition_ready_memory,
             ("ready", "error"): self.transition_ready_error,
-            ("ready", "waiting"): self.transition_ready_waiting,
-            ("constrained", "waiting"): self.transition_ready_waiting,
+            ("ready", "waiting"): self.transition_ready_waiting_notrunnable,
+            ("constrained", "waiting"): self.transition_ready_waiting_notrunnable,
             ("constrained", "executing"): self.transition_constrained_executing,
             ("executing", "memory"): self.transition_executing_done,
             ("executing", "error"): self.transition_executing_done,
@@ -1739,19 +1739,31 @@ class Worker(ServerNode):
         # scenarios
         # self.batched_stream.send({"op": "add-keys", "keys": [ts.key]})
 
-    def transition_ready_waiting(self, ts):
+    def transition_ready_waiting_notrunnable(self, ts):
         """
         This transition is common for work stealing
         """
+        if self.validate:
+            assert ts.state in READY
+            assert not ts.waiting_for_data
+
         ts.state = "waiting"
         ts.runspec = None
+
         # FIXME GH4413 Replace with recommended transition to forgotten
         # If there are no dependents anymore, this has been a mere dependency
         # and it was not intended to be executed on this worker. In this case we
         # need to release the key ourselves since the scheduler will no longer
         # propagate the deletion to this worker
+
+        for dep in ts.dependencies:
+            dep_ts = self.tasks[dep.key]
+            dep_ts.dependents.add(ts)
+
+        # ts.waiting_for_data.clear()
+
         if not ts.dependents:
-            self.release_key(ts.key)
+            self.release_key(ts.key, reason="Transition not runnable")
             return
         return ts.state
 
@@ -2314,10 +2326,10 @@ class Worker(ServerNode):
 
     def release_key(self, key, reason=None, cause=None, report=True):
         try:
-
-            if self.validate:
-                self.validate_state()
-            ts = self.tasks.get(key, TaskState(key=key))
+            ts = self.tasks.get(key)
+            if ts is None:
+                logger.debug("Task already released %s" % key)
+                return
             logger.debug(
                 f"Worker {self.name} - {self.address} - Release key {ts} - Cause {cause} - Reason {reason}"
             )
@@ -2333,7 +2345,7 @@ class Worker(ServerNode):
                     "waiting",
                     "flight",
                 ):
-                    self.release_key(dependency.key)
+                    self.release_key(dependency.key, reason=f"recurse {key} - {reason}")
 
             if key in self.threads:
                 del self.threads[key]
@@ -2370,8 +2382,6 @@ class Worker(ServerNode):
                 if key in self.tasks:
                     self.tasks.pop(key)
             del ts
-            if self.validate:
-                self.validate_state()
         except CommClosedError:
             pass
         except Exception as e:
@@ -3030,6 +3040,7 @@ class Worker(ServerNode):
                     # the task once the dependents are gone
                     # assert ts in dep.dependents  # hit in test_clean_nbytes
                 for key in ts.waiting_for_data:
+                    assert key in self.tasks
                     ts_wait = self.tasks[key]
                     assert ts_wait.state in PROCESSING, ts_wait
                     waiting_keys.add(key)
