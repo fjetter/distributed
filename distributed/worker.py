@@ -2235,7 +2235,11 @@ class Worker(ServerNode):
         self.log.append(("handle-missing", deps))
 
         deps2 = {
-            dep for dep in deps if dep.dependents and dep.state in ("flight", "waiting")
+            dep
+            for dep in deps
+            if dep.dependents and dep.state in ("flight", "waiting")
+            # FIXME GH4413
+            and dep.runspec is None
         }
         logger.debug(
             "Worker %s - %s  - Handle missing %s from worker %s."
