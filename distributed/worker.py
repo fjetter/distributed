@@ -1729,7 +1729,7 @@ class Worker(ServerNode):
     def transition_ready_memory(self, ts, value=None):
         if value:
             self.put_key_in_memory(ts, value=value)
-        self.send_task_state_to_scheduler(ts)
+        # self.send_task_state_to_scheduler(ts)
 
         # FIXME: The scheduler method add-keys is flagged as deprecated but the
         # ordinary submit task to scheduler may release keys if a key is
@@ -1737,7 +1737,7 @@ class Worker(ServerNode):
         # one). For this particular transition this might not be the correct
         # choice since this is an "unnatural" transition in error or stealing
         # scenarios
-        # self.batched_stream.send({"op": "add-keys", "keys": [ts.key]})
+        self.batched_stream.send({"op": "add-keys", "keys": [ts.key]})
 
     def transition_ready_waiting_notrunnable(self, ts):
         """
@@ -2328,6 +2328,8 @@ class Worker(ServerNode):
             # otherwise this worker may never fetch it in case it is still
             # required
             self.transition(ts, "waiting")
+            if self.validate:
+                assert ts.runspec is None
 
     def release_key(self, key, reason=None, cause=None, report=True):
         try:
