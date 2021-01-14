@@ -2237,8 +2237,8 @@ class Worker(ServerNode):
         the scheduler and trigger a key state reset to recompute the key"""
         self.log.append(("handle-missing", deps))
 
-        deps2 = {
-            dep
+        dep_keys = {
+            dep.key
             for dep in deps
             if dep.dependents and dep.state in ("flight", "waiting")
             # FIXME GH4413
@@ -2246,26 +2246,28 @@ class Worker(ServerNode):
         }
         logger.debug(
             "Worker %s - %s  - Handle missing %s from worker %s."
-            % (self.name, self.address, deps2, worker)
+            % (self.name, self.address, dep_keys, worker)
         )
-        if not deps2:
+        if not dep_keys:
             return
 
-        for dep in deps2:
+        for key in dep_keys:
             logger.info(
                 "Dependent not found: %s on %s .  Asking scheduler",
-                dep.key,
+                key,
                 worker,
             )
         who_has = await retry_operation(
             self.scheduler.who_has,
-            keys={d.key for d in deps2},
+            keys=dep_keys,
         )
         who_has_2 = {k: v for k, v in who_has.items() if v}
 
         for task_key, task_who_has in who_has_2.items():
-            ts = self.tasks[task_key]
-            deps2.remove(ts)
+            ts = self.tasks.get(task_key)
+            dep_keys.remove(task_key)
+            if ts is None:
+                continue
 
             if ts.state not in ("flight", "waiting"):
                 continue
@@ -2275,10 +2277,12 @@ class Worker(ServerNode):
                     {"op": "missing-data", "errant_worker": worker, "key": task_key}
                 )
         self.update_who_has(who_has)
-        for dep in deps2:
-            self.remove_who_has(dep.key, worker)
+        for key in dep_keys:
+            if key not in self.tasks:
+                continue
+            self.remove_who_has(key, worker)
             self.batched_stream.send(
-                {"op": "missing-data", "errant_worker": worker, "key": dep.key}
+                {"op": "missing-data", "errant_worker": worker, "key": key}
             )
 
     async def query_who_has(self, *deps):
@@ -2296,6 +2300,8 @@ class Worker(ServerNode):
     def update_who_has(self, who_has):
         try:
             for dep, workers in who_has.items():
+                if dep not in self.tasks:
+                    continue
                 if not workers:
                     continue
 
