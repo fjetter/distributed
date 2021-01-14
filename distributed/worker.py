@@ -2252,6 +2252,7 @@ class Worker(ServerNode):
             logger.info(
                 "Dependent not found: %s %s .  Asking scheduler",
                 dep.key,
+                # FIXME: suspicious count not used atm
                 dep.suspicious_count,
             )
         who_has = await retry_operation(
@@ -2263,17 +2264,17 @@ class Worker(ServerNode):
             ts = self.tasks[task_key]
             deps2.remove(ts)
 
+            if ts.state not in ("flight", "waiting"):
+                continue
             if ts.who_has == set(task_who_has):
                 self.batched_stream.send(
                     {"op": "missing-data", "errant_worker": worker, "key": task_key}
                 )
-                self.transition(ts, "waiting", worker=worker)
         self.update_who_has(who_has)
         for dep in deps2:
             self.batched_stream.send(
                 {"op": "missing-data", "errant_worker": worker, "key": dep.key}
             )
-            self.transition(dep, "waiting", worker=worker)
 
     async def query_who_has(self, *deps):
         if self.validate:
