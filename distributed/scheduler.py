@@ -3369,13 +3369,15 @@ class Scheduler(ServerNode):
         self.transitions(r)
 
     def handle_missing_data(self, key=None, errant_worker=None, **kwargs):
-        logger.debug("handle missing data key=%s worker=%s", key, errant_worker)
+        logger.info("handle missing data key=%s worker=%s", key, errant_worker)
         self.log.append(("missing", key, errant_worker))
 
         ts: TaskState = self.tasks.get(key)
         if ts is None or not ts._who_has:
+            logger.info("Missing data key not known %s" % key)
             return
         if errant_worker in self.workers:
+            logger.info("Removing errant worker %s from task %s" % (errant_worker, key))
             ws: WorkerState = self.workers[errant_worker]
             if ws in ts._who_has:
                 ts._who_has.remove(ws)
@@ -3383,6 +3385,7 @@ class Scheduler(ServerNode):
                 ws._nbytes -= ts.get_nbytes()
         if not ts._who_has:
             if ts._run_spec:
+                logger.info("Release missing data %s" % key)
                 self.transitions({key: "released"})
             else:
                 self.transitions({key: "forgotten"})
@@ -4962,8 +4965,9 @@ class Scheduler(ServerNode):
 
             if ws != ts._processing_on:  # someone else has this task
                 logger.info(
-                    "Unexpected worker completed task, likely due to"
+                    "Unexpected worker completed task %s, likely due to"
                     " work stealing.  Expected: %s, Got: %s, Key: %s",
+                    ts.key,
                     ts._processing_on,
                     ws,
                     key,
