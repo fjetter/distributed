@@ -1351,7 +1351,7 @@ class Worker(ServerNode):
                     data[k] = Actor(type(self.actors[k]), self.address, k)
         if len(data) != len(keys):
             logger.debug(
-                "Data request from %s but keys %s are not available."
+                "Get data request from %s but keys %s are not available."
                 % (who, set(keys) - set(data))
             )
 
@@ -1522,10 +1522,13 @@ class Worker(ServerNode):
                     ts.waiting_for_data.add(dep_ts.key)
                     self.waiting_for_data_count += 1
 
+                dep_ts.who_has.update(workers)
+                for worker in workers:
+                    self.has_what[worker].add(dep_ts.key)
+                    if dep_ts.state != "memory":
+                        self.pending_data_per_worker[worker].append(dep_ts.key)
                 ts.dependencies.add(dep_ts)
                 dep_ts.dependents.add(ts)
-
-            self.update_who_has(who_has)
 
             if nbytes is not None:
                 for key, value in nbytes.items():
@@ -2256,7 +2259,8 @@ class Worker(ServerNode):
                 dep.suspicious_count,
             )
         who_has = await retry_operation(
-            self.scheduler.who_has, keys={d.key for d in deps2}
+            self.scheduler.who_has,
+            keys={d.key for d in deps2},
         )
         who_has_2 = {k: v for k, v in who_has.items() if v}
 
@@ -2267,11 +2271,13 @@ class Worker(ServerNode):
             if ts.state not in ("flight", "waiting"):
                 continue
             if ts.who_has == set(task_who_has):
+                self.remove_who_has(ts.key, worker)
                 self.batched_stream.send(
                     {"op": "missing-data", "errant_worker": worker, "key": task_key}
                 )
         self.update_who_has(who_has)
         for dep in deps2:
+            self.remove_who_has(dep.key, worker)
             self.batched_stream.send(
                 {"op": "missing-data", "errant_worker": worker, "key": dep.key}
             )
@@ -2284,22 +2290,20 @@ class Worker(ServerNode):
             self.update_who_has(response)
             return response
 
+    def remove_who_has(self, key, worker):
+        self.tasks[key].who_has.discard(worker)
+        self.has_what[worker].discard(key)
+
     def update_who_has(self, who_has):
         try:
             for dep, workers in who_has.items():
                 if not workers:
                     continue
 
-                dep_ts = self.tasks[dep]
-                old = self.tasks[dep].who_has
-                self.tasks[dep].who_has = set(workers)
+                self.tasks[dep].who_has.update(workers)
 
                 for worker in workers:
                     self.has_what[worker].add(dep)
-                    if dep_ts.state != "memory":
-                        self.pending_data_per_worker[worker].append(dep_ts.key)
-                for worker in old - set(workers):
-                    self.has_what[worker].discard(dep)
 
         except Exception as e:
             logger.exception(e)

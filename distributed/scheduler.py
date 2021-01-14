@@ -3377,18 +3377,26 @@ class Scheduler(ServerNode):
             logger.info("Missing data key not known %s" % key)
             return
         if errant_worker in self.workers:
-            logger.info("Removing errant worker %s from task %s" % (errant_worker, key))
             ws: WorkerState = self.workers[errant_worker]
             if ws in ts._who_has:
+                logger.info(
+                    "Removing errant worker %s from task %s" % (errant_worker, key)
+                )
                 ts._who_has.remove(ws)
                 ws._has_what.remove(ts)
                 ws._nbytes -= ts.get_nbytes()
-        if not ts._who_has:
-            if ts._run_spec:
-                logger.info("Release missing data %s" % key)
-                self.transitions({key: "released"})
+                if not ts._who_has:
+                    if ts._run_spec:
+                        logger.info("Release missing data %s" % key)
+                        self.transitions({key: "released"})
+                    else:
+                        self.transitions({key: "forgotten"})
             else:
-                self.transitions({key: "forgotten"})
+                logger.info(
+                    "Worker %s was not supposed to hold information" % errant_worker
+                )
+        else:
+            logger.info("Worker %s unknown." % errant_worker)
 
     def release_worker_data(self, comm=None, keys=None, worker=None):
         ws: WorkerState = self.workers[worker]
