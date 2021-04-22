@@ -79,6 +79,7 @@ from .utils import (
     no_default,
     parse_bytes,
     parse_timedelta,
+    shielded,
     tmpfile,
     validate_key,
 )
@@ -3585,7 +3586,6 @@ class Scheduler(SchedulerState, ServerNode):
             "start_task_metadata": self.start_task_metadata,
             "stop_task_metadata": self.stop_task_metadata,
         }
-
         connection_limit = get_fileno_limit() / 2
 
         super().__init__(
@@ -3754,6 +3754,7 @@ class Scheduler(SchedulerState, ServerNode):
         setproctitle("dask-scheduler [%s]" % (self.address,))
         return self
 
+    @shielded
     async def close(self, comm=None, fast=False, close_workers=False):
         """Send cleanup signal to all coroutines then wait until finished
 
@@ -3810,10 +3811,6 @@ class Scheduler(SchedulerState, ServerNode):
         for comm in self.client_comms.values():
             comm.abort()
 
-        await self.rpc.close()
-
-        self.status = Status.closed
-        self.stop()
         await super().close()
 
         setproctitle("dask-scheduler [closed]")
@@ -3823,15 +3820,20 @@ class Scheduler(SchedulerState, ServerNode):
         """Remove a worker from the cluster
 
         This both removes the worker from our local state and also sends a
-        signal to the worker to shut down.  This works regardless of whether or
-        not the worker has a nanny process restarting it
+        signal to the worker to shut down.
+        If a Nanny is in front of the worker, the Nanny is instead instructed to
+        close.
         """
         logger.info("Closing worker %s", worker)
+        parent: SchedulerState = cast(SchedulerState, self)
         with log_errors():
             self.log_event(worker, {"action": "close-worker"})
-            # FIXME: This does not handly nannys
-            self.worker_send(worker, {"op": "close", "report": False})
-            await self.remove_worker(address=worker, safe=safe)
+            ws: WorkerState = parent._workers_dv[worker]
+            if ws._nanny:
+                await self.rpc(ws._nanny).terminate()
+            else:
+                self.worker_send(worker, {"op": "close", "report": False})
+            await self.remove_worker(address=worker, safe=safe, close=False)
 
     ###########
     # Stimuli #
@@ -6277,7 +6279,10 @@ class Scheduler(SchedulerState, ServerNode):
                     )
                 if remove:
                     await asyncio.gather(
-                        *[self.remove_worker(address=w, safe=True) for w in worker_keys]
+                        *[
+                            self.remove_worker(address=w, safe=True, close=False)
+                            for w in worker_keys
+                        ]
                     )
 
                 self.log_event(

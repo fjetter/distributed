@@ -137,7 +137,6 @@ async def test_scale(cleanup):
         assert len(cluster.workers) == 2
 
 
-@pytest.mark.slow
 @pytest.mark.asyncio
 async def test_adaptive_killed_worker(cleanup):
     with dask.config.set({"distributed.deploy.lost-worker-timeout": 0.1}):
@@ -150,7 +149,7 @@ async def test_adaptive_killed_worker(cleanup):
 
             async with Client(cluster, asynchronous=True) as client:
 
-                cluster.adapt(minimum=1, maximum=1)
+                cluster.adapt(minimum=1, maximum=1, interval="10ms")
 
                 # Scale up a cluster with 1 worker.
                 while len(cluster.workers) != 1:

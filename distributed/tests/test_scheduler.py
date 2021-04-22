@@ -2802,3 +2802,15 @@ async def test_transition_counter(c, s, a, b):
     assert s.transition_counter == 0
     await c.submit(inc, 1)
     assert s.transition_counter > 1
+
+
+@gen_cluster(nthreads=[])
+async def test_scheduler_terminate(s):
+    s_rpc = rpc(s.address)
+    await s_rpc.terminate(reply=False)
+
+    while s.status != Status.closed:
+        await asyncio.sleep(0.05)
+
+    # already closed should be noop
+    await s.close()

@@ -68,6 +68,7 @@ from .utils import (
     parse_bytes,
     parse_ports,
     parse_timedelta,
+    shielded,
     silence_logging,
     thread_state,
     typename,
@@ -1218,13 +1219,26 @@ class Worker(ServerNode):
         warnings.warn("Worker._close has moved to Worker.close", stacklevel=2)
         return self.close(*args, **kwargs)
 
+    @shielded
     async def close(
         self, report=True, timeout=10, nanny=True, executor_wait=True, safe=False
     ):
         with log_errors():
-            if self.status in (Status.closed, Status.closing):
+            if self.status in (
+                Status.closing,
+                Status.closed,
+            ):
                 await self.finished()
                 return
+
+            if self.status not in (Status.running, Status.closing_gracefully):
+                logger.info(
+                    "Closed worker %s has not yet started: %s",
+                    self.name,
+                    self.status,
+                )
+
+            self.status = Status.closing
 
             self.reconnect = False
             disable_gc_diagnosis()
@@ -1233,9 +1247,6 @@ class Worker(ServerNode):
                 logger.info("Stopping worker at %s", self.address)
             except ValueError:  # address not available if already closed
                 logger.info("Stopping worker")
-            if self.status not in (Status.running, Status.closing_gracefully):
-                logger.info("Closed worker has not yet started: %s", self.status)
-            self.status = Status.closing
 
             for preload in self.preloads:
                 await preload.teardown()
@@ -1312,11 +1323,7 @@ class Worker(ServerNode):
                 else:
                     executor.shutdown(wait=executor_wait)
 
-            self.stop()
-            await self.rpc.close()
-
-            self.status = Status.closed
-            await ServerNode.close(self)
+            await super().close()
 
             setproctitle("dask-worker [closed]")
         return "OK"
