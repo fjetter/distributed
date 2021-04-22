@@ -14,7 +14,6 @@ from functools import partial
 
 import tblib
 from tlz import merge
-from tornado import gen
 from tornado.ioloop import IOLoop, PeriodicCallback
 
 import dask
@@ -37,6 +36,7 @@ from .utils import (
     get_traceback,
     has_keyword,
     is_coroutine_function,
+    shielded,
     truncate_exception,
 )
 
@@ -160,6 +160,7 @@ class Server:
         self.counters = None
         self.digests = None
         self._ongoing_coroutines = weakref.WeakSet()
+
         self._event_finished = asyncio.Event()
 
         self.listeners = []
@@ -263,10 +264,17 @@ class Server:
 
     def __await__(self):
         async def _():
+            if self.status == Status.running:
+                return self
+
+            if self.status in (Status.closing, Status.closed):
+                # We should never await an object which is already closing but
+                # we should also not start it up again otherwise we'd produce
+                # zombies
+                await self.finished()
+
             timeout = getattr(self, "death_timeout", 0)
             async with self._startup_lock:
-                if self.status == Status.running:
-                    return self
                 if timeout:
                     try:
                         await asyncio.wait_for(self.start(), timeout=timeout)
@@ -422,7 +430,7 @@ class Server:
 
         logger.debug("Connection from %r to %s", address, type(self).__name__)
         self._comms[comm] = op
-        await self
+
         try:
             while True:
                 try:
@@ -565,17 +573,15 @@ class Server:
                                 break
                             handler = self.stream_handlers[op]
                             if is_coroutine_function(handler):
-                                self.loop.add_callback(handler, **merge(extra, msg))
-                                await gen.sleep(0)
+                                await handler(**merge(extra, msg))
                             else:
                                 handler(**merge(extra, msg))
                         else:
                             logger.error("odd message %s", msg)
-                    await asyncio.sleep(0)
 
                 for func in every_cycle:
                     if is_coroutine_function(func):
-                        self.loop.add_callback(func)
+                        await func()
                     else:
                         func()
 
@@ -593,32 +599,39 @@ class Server:
             await comm.close()
             assert comm.closed()
 
-    @gen.coroutine
-    def close(self):
+    @shielded
+    async def close(self):
+        self.status = Status.closing
+        self.stop()
+        await self.rpc.close()
+
         for pc in self.periodic_callbacks.values():
             pc.stop()
         self.__stopped = True
         for listener in self.listeners:
             future = listener.stop()
             if inspect.isawaitable(future):
-                yield future
-        for i in range(20):
+                await future
+        for _ in range(20):
             # If there are still handlers running at this point, give them a
             # second to finish gracefully themselves, otherwise...
             if any(self._comms.values()):
-                yield asyncio.sleep(0.05)
+                await asyncio.sleep(0.05)
             else:
                 break
-        yield [comm.close() for comm in list(self._comms)]  # then forcefully close
+        await asyncio.gather(
+            *[comm.close() for comm in list(self._comms)]
+        )  # then forcefully close
         for cb in self._ongoing_coroutines:
             cb.cancel()
-        for i in range(10):
+        for _ in range(10):
             if all(c.cancelled() for c in self._ongoing_coroutines):
                 break
             else:
-                yield asyncio.sleep(0.01)
+                await asyncio.sleep(0.01)
 
         self._event_finished.set()
+        self.status = Status.closed
 
 
 def pingpong(comm):
