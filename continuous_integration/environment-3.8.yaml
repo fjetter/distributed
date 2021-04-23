@@ -26,7 +26,6 @@ dependencies:
   - pytest-faulthandler
   - pytest-repeat
   - pytest-rerunfailures
-  - pytest-timeout
   - requests
   - s3fs
   - scikit-learn
