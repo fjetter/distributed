@@ -172,7 +172,7 @@ async def dont_test_delete_data_with_missing_worker(c, a, b):
     await cc.close_rpc()
 
 
-@gen_cluster(client=True)
+@gen_cluster(client=True, allow_dead_workers=True)
 async def test_upload_file(c, s, a, b):
     assert not os.path.exists(os.path.join(a.local_directory, "foobar.py"))
     assert not os.path.exists(os.path.join(b.local_directory, "foobar.py"))
@@ -230,7 +230,7 @@ async def test_upload_file_pyc(c, s, w):
             sys.path.remove(dirname)
 
 
-@gen_cluster(client=True)
+@gen_cluster(client=True, allow_dead_workers=True)
 async def test_upload_egg(c, s, a, b):
     eggname = "testegg-1.0.0-py3.4.egg"
     local_file = __file__.replace("test_worker.py", eggname)
@@ -259,7 +259,7 @@ async def test_upload_egg(c, s, a, b):
     assert not os.path.exists(os.path.join(a.local_directory, eggname))
 
 
-@gen_cluster(client=True)
+@gen_cluster(client=True, allow_dead_workers=True)
 async def test_upload_pyz(c, s, a, b):
     pyzname = "mytest.pyz"
     local_file = __file__.replace("test_worker.py", pyzname)
@@ -521,7 +521,11 @@ async def test_spill_by_default(c, s, w):
     assert len(w.data.disk)  # something is on disk
 
 
-@gen_cluster(nthreads=[("127.0.0.1", 1)], worker_kwargs={"reconnect": False})
+@gen_cluster(
+    nthreads=[("127.0.0.1", 1)],
+    worker_kwargs={"reconnect": False},
+    allow_dead_workers=True,
+)
 async def test_close_on_disconnect(s, w):
     await s.close()
 
@@ -1556,7 +1560,7 @@ async def test_worker_listens_on_same_interface_by_default(Worker):
             assert s.ip == w.ip
 
 
-@gen_cluster(client=True)
+@gen_cluster(client=True, allow_dead_workers=True)
 async def test_close_gracefully(c, s, a, b):
     futures = c.map(slowinc, range(200), delay=0.1)
     while not b.data:
