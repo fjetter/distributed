@@ -2438,10 +2438,7 @@ class Worker(ServerNode):
                 # don't boot keys that are in flight
                 # we don't know if they're already queued up for transit
                 # in a gather_dep callback
-                if not dependency.dependents and dependency.state in (
-                    "waiting",
-                    "fetch",
-                ):
+                if not dependency.dependents:
                     self.release_key(dependency.key, cause=f"Dependent {ts} released")
 
             for worker in ts.who_has:

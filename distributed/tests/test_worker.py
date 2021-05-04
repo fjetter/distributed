@@ -1833,8 +1833,7 @@ def assert_task_states_on_worker(expected, worker):
     assert set(expected) == set(worker.tasks)
 
 
-# @pytest.mark.xfail(reason="Cluster behaves different to what is expected")
-@gen_cluster(client=True, timeout=30)
+@gen_cluster(client=True)
 async def test_worker_state_error(c, s, a, b):
     def raise_exc(*args):
         raise RuntimeError()
@@ -1858,17 +1857,13 @@ async def test_worker_state_error(c, s, a, b):
     expected_states = {
         # A was instructed to compute this result and we're still holding a ref via `f`
         f.key: "memory",
-        # This was fetched from another worker. While we hold a ref via `g`, the scheduler
+        # This was fetched from another worker. While we hold a ref via `g`, the
+        # scheduler only instructed to compute this on B
         g.key: "memory",
         res.key: "error",
     }
     assert_task_states_on_worker(expected_states, a)
     # Expected states after we release references to the futures
-    expected_states = {
-        f.key: "memory",
-        g.key: "memory",
-        res.key: "error",
-    }
     f.release()
     g.release()
 
@@ -1877,21 +1872,21 @@ async def test_worker_state_error(c, s, a, b):
     while b.tasks:
         await asyncio.sleep(0.01)
 
+    expected_states = {
+        # We currently don't have a good way to actually release this memory as
+        # long as the tasks still have a dependent. We'll need to live with this
+        # memory for now
+        f.key: "memory",
+        g.key: "memory",
+        res.key: "error",
+    }
+
     assert_task_states_on_worker(expected_states, a)
 
     res.release()
 
-    expected_states = {
-        f.key: "memory",  # expected to be gone
-        g.key: "memory",  # expected to be gone
-        res.key: "error",
-    }
-
-    await asyncio.sleep(0.01)
-    assert_task_states_on_worker(expected_states, a)
-
     # We no longer hold any refs. Cluster should reset completely
     # This is not happening
-    # for server in [s, a, b]:
-    #     while server.tasks:
-    #         await asyncio.sleep(0.01)
+    for server in [s, a, b]:
+        while server.tasks:
+            await asyncio.sleep(0.01)
