@@ -1823,3 +1823,64 @@ async def test_story_with_deps(c, s, a, b):
 def test_weight_deprecated():
     with pytest.warns(DeprecationWarning):
         weight("foo", "bar")
+
+
+@pytest.mark.xfail(reason="Cluster behaves different to what is expected")
+@gen_cluster(client=True, timeout=5)
+async def test_worker_state_error(c, s, a, b):
+    def raise_exc(*args):
+        raise RuntimeError()
+
+    f = c.submit(inc, 1, workers=[a.address], key="f")
+    g = c.submit(inc, 1, workers=[b.address], key="g")
+    res = c.submit(raise_exc, f, g, workers=[a.address])
+
+    with pytest.raises(RuntimeError):
+        await res.result()
+
+    # Nothing bad happened on B, therefore B should hold on to G
+    assert len(b.tasks) == 1
+    assert g.key in b.tasks
+
+    # A raised the exception therefore we should hold on to the erroneous task
+    assert res.key in a.tasks
+    ts = a.tasks[res.key]
+    assert ts.state == "error"
+
+    expected_states = {
+        f.key: "memory",
+        g.key: "memory",
+        res.key: "error",
+    }
+
+    dep_keys = []
+    for dep_key in [f.key, g.key]:
+        assert dep_key in a.tasks
+        dep_keys.append(dep_key)
+        dep_ts = a.tasks[dep_key]
+        assert dep_ts.state == expected_states[dep_key]
+
+    # Expected states after we release references to the futures
+    expected_states = {
+        f.key: "released",
+        g.key: "released",
+        res.key: "error",
+    }
+    del f, g
+
+    # We no longer hold a reference to G and therefore B should release
+    # everything
+    while b.tasks:
+        await asyncio.sleep(0.01)
+
+    for dep_key in dep_keys:
+        assert dep_key in a.tasks
+        dep_ts = a.tasks[dep_key]
+        assert dep_ts.state == expected_states[dep_key]
+
+    del res
+
+    # We no longer hold any refs. Cluster should reset completely
+    for server in [s, a, b]:
+        while server.tasks:
+            await asyncio.sleep(0.01)
