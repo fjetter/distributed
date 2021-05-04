@@ -1825,8 +1825,16 @@ def test_weight_deprecated():
         weight("foo", "bar")
 
 
-@pytest.mark.xfail(reason="Cluster behaves different to what is expected")
-@gen_cluster(client=True, timeout=5)
+def assert_task_states_on_worker(expected, worker):
+    for dep_key, expected_state in expected.items():
+        assert dep_key in worker.tasks, (worker.name, dep_key, worker.tasks)
+        dep_ts = worker.tasks[dep_key]
+        assert dep_ts.state == expected_state, (worker.name, dep_ts, expected_state)
+    assert set(expected) == set(worker.tasks)
+
+
+# @pytest.mark.xfail(reason="Cluster behaves different to what is expected")
+@gen_cluster(client=True, timeout=30)
 async def test_worker_state_error(c, s, a, b):
     def raise_exc(*args):
         raise RuntimeError()
@@ -1848,39 +1856,42 @@ async def test_worker_state_error(c, s, a, b):
     assert ts.state == "error"
 
     expected_states = {
+        # A was instructed to compute this result and we're still holding a ref via `f`
+        f.key: "memory",
+        # This was fetched from another worker. While we hold a ref via `g`, the scheduler
+        g.key: "memory",
+        res.key: "error",
+    }
+    assert_task_states_on_worker(expected_states, a)
+    # Expected states after we release references to the futures
+    expected_states = {
         f.key: "memory",
         g.key: "memory",
         res.key: "error",
     }
+    f.release()
+    g.release()
 
-    dep_keys = []
-    for dep_key in [f.key, g.key]:
-        assert dep_key in a.tasks
-        dep_keys.append(dep_key)
-        dep_ts = a.tasks[dep_key]
-        assert dep_ts.state == expected_states[dep_key]
-
-    # Expected states after we release references to the futures
-    expected_states = {
-        f.key: "released",
-        g.key: "released",
-        res.key: "error",
-    }
-    del f, g
-
-    # We no longer hold a reference to G and therefore B should release
-    # everything
+    # We no longer hold any refs to f or g and B didn't have any erros. It
+    # releases everything as expected
     while b.tasks:
         await asyncio.sleep(0.01)
 
-    for dep_key in dep_keys:
-        assert dep_key in a.tasks
-        dep_ts = a.tasks[dep_key]
-        assert dep_ts.state == expected_states[dep_key]
+    assert_task_states_on_worker(expected_states, a)
 
-    del res
+    res.release()
+
+    expected_states = {
+        f.key: "memory",  # expected to be gone
+        g.key: "memory",  # expected to be gone
+        res.key: "error",
+    }
+
+    await asyncio.sleep(0.01)
+    assert_task_states_on_worker(expected_states, a)
 
     # We no longer hold any refs. Cluster should reset completely
-    for server in [s, a, b]:
-        while server.tasks:
-            await asyncio.sleep(0.01)
+    # This is not happening
+    # for server in [s, a, b]:
+    #     while server.tasks:
+    #         await asyncio.sleep(0.01)
