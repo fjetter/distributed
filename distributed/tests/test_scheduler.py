@@ -1893,13 +1893,13 @@ async def test_task_groups(c, s, a, b):
     assert tg.nbytes_total == tp.nbytes_total
     # It should map down to individual tasks
     assert tg.nbytes_total == sum(
-        [ts.get_nbytes() for ts in s.tasks.values() if ts._group is tg]
+        [ts.get_nbytes() for ts in s.tasks.values() if ts.group is tg]
     )
     in_memory_ts = sum(
         [
             ts.get_nbytes()
             for ts in s.tasks.values()
-            if ts._group is tg and ts.state == "memory"
+            if ts.group is tg and ts.state == "memory"
         ]
     )
     assert tg.nbytes_in_memory == in_memory_ts
