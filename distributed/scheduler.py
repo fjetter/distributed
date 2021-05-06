@@ -7075,7 +7075,7 @@ def _client_releases_keys(
     state: SchedulerState, keys: list, cs: ClientState, recommendations: dict
 ):
     """ Remove keys from client desired list """
-    logger.critical("Client %s releases keys: %s", cs._client_key, keys)
+    logger.debug("Client %s releases keys: %s", cs._client_key, keys)
     ts: TaskState
     for key in keys:
         ts = state._tasks.get(key)
