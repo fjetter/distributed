@@ -1211,7 +1211,7 @@ class TaskState:
 
     .. attribute:: erred_on: set(str)
 
-        Worker addresses on which errors appeard causing this task to be in an error state.
+        Worker addresses on which errors appeared causing this task to be in an error state.
 
     .. attribute:: suspicious: int
 
