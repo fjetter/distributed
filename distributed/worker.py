@@ -3134,6 +3134,7 @@ class Worker(ServerNode):
         assert ts.key in self.in_flight_workers[ts.coming_from]
 
     def validate_task_fetch(self, ts):
+        assert ts.dependents, self.story(ts)
         assert ts.runspec is None
         assert ts.key not in self.data
 
