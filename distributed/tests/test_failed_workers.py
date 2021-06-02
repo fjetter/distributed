@@ -485,6 +485,7 @@ def foo():
     pass
 
 
+@pytest.mark.skip(reason="hard coded path")
 @gen_cluster(client=True)
 async def test_dump_everything(c, s, a, b):
     futures = c.map(inc, range(10))
