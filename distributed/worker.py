@@ -685,7 +685,7 @@ class Worker(ServerNode):
             "run_coroutine": self.run_coroutine,
             "get_data": self.get_data,
             "update_data": self.update_data,
-            "delete_data": self.delete_data,
+            "release_many_keys": self.release_many_keys,
             "terminate": self.close,
             "ping": pingpong,
             "upload_file": self.upload_file,
@@ -1482,26 +1482,33 @@ class Worker(ServerNode):
             self.log.append((key, "receive-from-scatter"))
 
         if report:
+
+            self.log.append(
+                ("Notifying scheduler about in-memory in update-data", list(data))
+            )
             self.batched_stream.send({"op": "add-keys", "keys": list(data)})
         info = {"nbytes": {k: sizeof(v) for k, v in data.items()}, "status": "OK"}
         return info
 
-    def release_task(self, key):
+    def release_many_keys(self, comm, keys, reason):
+        for k in keys:
+            # FIXME: Resolve ambiguity of names
+            self.release_task(k, reason=reason)
+
+    def release_task(self, key, reason):
         ts = self.tasks.get(key)
         if ts:
             ts.scheduler_holds_ref = False
-        self.release_key(key, report=False)
+        self.release_key(key, report=False, reason=reason)
 
-    def delete_data(self, comm=None, keys=None, report=True):
-        if keys:
-            for key in list(keys):
-                ts = self.tasks.get(key)
-                if ts:
-                    ts.scheduler_holds_ref = False
-                self.log.append((key, "delete"))
-                self.release_key(key, reason="delete data")
+    def delete_data(self, keys=(), reason=None):
+        for key in list(keys):
+            ts = self.tasks.get(key)
+            self.log.append((key, "delete", reason))
+            if ts and not ts.scheduler_holds_ref:
+                self.release_key(key, reason=f"delete data: {reason}", report=False)
 
-            logger.debug("Worker %s -- Deleted %d keys", self.name, len(keys))
+                logger.debug("Worker %s -- Deleted %d keys", self.name, len(keys))
         return "OK"
 
     async def set_resources(self, **resources):
@@ -1604,10 +1611,23 @@ class Worker(ServerNode):
 
                     # transition from new -> fetch handles adding dependency
                     # to waiting_for_data
+                    discarded_self = False
+                    if self.address in workers and state == "fetch":
+                        discarded_self = True
+                        workers = set(workers)
+                        workers.discard(self.address)
+                        who_has[dependency] = tuple(workers)
+
                     self.transition(dep_ts, state, who_has=workers)
 
                     self.log.append(
-                        (dependency, "new-dep", dep_ts.state, f"requested by {ts.key}")
+                        (
+                            dependency,
+                            "new-dep",
+                            dep_ts.state,
+                            f"requested by {ts.key}",
+                            discarded_self,
+                        )
                     )
 
                 else:
@@ -1656,8 +1676,10 @@ class Worker(ServerNode):
         if start == finish:
             return
         func = self._transitions[start, finish]
+        self.log.append((ts.key, start, finish))
         state = func(ts, **kwargs)
-        self.log.append((ts.key, start, state or finish))
+        if state and finish != state:
+            self.log.append((ts.key, start, finish, state))
         ts.state = state or finish
         if self.validate:
             self.validate_task(ts)
@@ -1682,7 +1704,7 @@ class Worker(ServerNode):
             if self.validate:
                 assert ts.state == "new"
                 assert ts.runspec is None
-                assert who_has
+                # assert who_has
 
             for dependent in ts.dependents:
                 dependent.waiting_for_data.add(ts.key)
@@ -1791,6 +1813,7 @@ class Worker(ServerNode):
             if not ts.who_has:
                 if ts.key not in self._missing_dep_flight:
                     self._missing_dep_flight.add(ts.key)
+                    logger.info("Task %s does not know who has", ts)
                     self.loop.add_callback(self.handle_missing_dep, ts)
             for w in ts.who_has:
                 self.pending_data_per_worker[w].append(ts.key)
@@ -1822,6 +1845,7 @@ class Worker(ServerNode):
                 except KeyError:
                     pass
 
+            self.log.append(("Notifying scheduler about in-memory", ts.key))
             self.batched_stream.send({"op": "add-keys", "keys": [ts.key]})
 
         except Exception as e:
@@ -1948,6 +1972,7 @@ class Worker(ServerNode):
                     ts.state = "error"
                     out = "error"
 
+                # FIXME: At some point I required this to be gone. What happened?
                 # Don't release the dependency keys, but do remove them from `dependents`
                 for dependency in ts.dependencies:
                     dependency.dependents.discard(ts)
@@ -2064,10 +2089,9 @@ class Worker(ServerNode):
                         else:
                             dependencies_fetch.add(dependency_ts)
 
-                del dependencies
+                del dependencies, dependency_ts
 
                 if dependencies_missing:
-                    logger.info("Can't find dependencies for key %s", key)
                     missing_deps2 = {
                         dep
                         for dep in dependencies_missing
@@ -2075,8 +2099,13 @@ class Worker(ServerNode):
                     }
                     for dep in missing_deps2:
                         self._missing_dep_flight.add(dep.key)
-                    self.loop.add_callback(self.handle_missing_dep, *missing_deps2)
-
+                    if missing_deps2:
+                        logger.info(
+                            "Can't find dependencies %s for key %s",
+                            missing_deps2.copy(),
+                            key,
+                        )
+                        self.loop.add_callback(self.handle_missing_dep, *missing_deps2)
                     dependencies_fetch -= dependencies_missing
 
                 self.log.append(
@@ -2267,7 +2296,9 @@ class Worker(ServerNode):
                     dependency_ts = self.tasks.get(dependency_key)
                     if dependency_ts and dependency_ts.state == "flight":
                         to_gather_keys.add(dependency_key)
-                del to_gather
+                # Keep namespace clean since this func is long and has many
+                # dep*, *ts* variables
+                del to_gather, dependency_key, dependency_ts
 
                 self.log.append(("request-dep", cause.key, worker, to_gather_keys))
                 logger.debug("Request %d keys for task %s", len(to_gather_keys), cause)
@@ -2361,7 +2392,10 @@ class Worker(ServerNode):
                 busy = response.get("status", "") == "busy"
                 data = response.get("data", {})
 
-                assert to_gather_keys == self.in_flight_workers.get(worker)
+                # FIXME: We should not handle keys which were skipped by this coro. to_gather_keys is only a subset
+                assert set(to_gather_keys).issubset(
+                    set(self.in_flight_workers.get(worker))
+                )
                 for d in self.in_flight_workers.pop(worker):
 
                     ts = self.tasks.get(d)
@@ -2376,17 +2410,23 @@ class Worker(ServerNode):
                         self.release_key(
                             d, reason="In-flight task no longer has dependents."
                         )
-                    elif ts.state not in ("ready", "memory"):
-                        self.log.append(("busy?", d, busy))
-                        self.transition(ts, "fetch")
-                    elif not busy and d not in data and ts.dependents:
+                    elif (
+                        not busy
+                        and d not in data
+                        and ts.dependents
+                        and ts.state != "memory"
+                    ):
+                        # FIXME: Is this the correct behaviour in case we do not receive the data?
                         self.log.append(("missing-dep", d))
                         self.batched_stream.send(
                             {"op": "missing-data", "errant_worker": worker, "key": d}
                         )
+                        self.transition(ts, "fetch")
+                    elif ts.state not in ("ready", "memory"):
+                        self.transition(ts, "fetch")
                     else:
-                        raise RuntimeError(
-                            f"Unexpected state for {ts} encountered after gather_dep"
+                        logger.debug(
+                            "Unexpected task state encountered for %s after gather_dep"
                         )
 
                 if self.validate:
@@ -2442,18 +2482,38 @@ class Worker(ServerNode):
             )
             who_has = {k: v for k, v in who_has.items() if v}
             self.update_who_has(who_has)
+            still_missing = set()
             for dep in deps:
                 dep.suspicious_count += 1
 
                 if not who_has.get(dep.key):
+                    logger.info(
+                        "No workers found for %s",
+                        dep.key,
+                    )
                     self.log.append((dep.key, "no workers found", dep.dependents))
-                    self.release_key(dep.key)
+                    self.release_key(dep.key, reason="Handle missing no workers")
+                elif self.address in who_has and dep.state != "memory":
+
+                    still_missing.add(dep)
+                    self.batched_stream.send(
+                        {
+                            "op": "release-worker-data",
+                            "keys": [dep.key],
+                            "worker": self.address,
+                        }
+                    )
                 else:
+                    logger.debug("New workers found for %s", dep.key)
                     self.log.append((dep.key, "new workers found"))
                     for dependent in dep.dependents:
                         if dependent.key in dep.waiting_for_data:
                             self.data_needed.append(dependent.key)
-
+            if still_missing:
+                logger.critical(
+                    "Found self referencing who has response from scheduler. Trying again handle_missng"
+                )
+                await self.handle_missing_dep(*deps)
         except Exception:
             logger.error("Handle missing dep failed, retrying", exc_info=True)
             retries = kwargs.get("retries", 5)
@@ -2484,6 +2544,8 @@ class Worker(ServerNode):
                     continue
 
                 if dep in self.tasks:
+                    if self.address in workers and self.tasks[dep].state != "memory":
+                        workers = set(workers) - {self.address}
                     self.tasks[dep].who_has.update(workers)
 
                     for worker in workers:
@@ -2513,6 +2575,7 @@ class Worker(ServerNode):
             # If task is marked as "constrained" we haven't yet assigned it an
             # `available_resources` to run on, that happens in
             # `transition_constrained_executing`
+            ts.scheduler_holds_ref = False
             self.release_key(ts.key, reason="stolen")
             if self.validate:
                 assert ts.key not in self.tasks
@@ -2525,9 +2588,16 @@ class Worker(ServerNode):
         report: bool = True,
     ):
         try:
+
             if self.validate:
                 assert isinstance(key, str)
             ts = self.tasks.get(key, TaskState(key=key))
+            # If the scheduler holds a reference which is usually the
+            # case when it instructed the task to be computed here or if
+            # data was scattered we must not release it unless the
+            # scheduler allow us to. See also handle_delete_data and
+            if ts and ts.scheduler_holds_ref:
+                return
             logger.debug(
                 "Release key %s",
                 {
@@ -2537,9 +2607,9 @@ class Worker(ServerNode):
                 },
             )
             if cause:
-                self.log.append((key, "release-key", {"cause": cause}))
+                self.log.append((key, "release-key", {"cause": cause}, reason))
             else:
-                self.log.append((key, "release-key"))
+                self.log.append((key, "release-key", reason))
             if key in self.data and not ts.dependents:
                 try:
                     del self.data[key]
@@ -2552,22 +2622,13 @@ class Worker(ServerNode):
             for dependency in ts.dependencies:
                 dependency.dependents.discard(ts)
 
-                if (
-                    not dependency.dependents
-                    and dependency.state
-                    not in (
-                        # don't boot keys that are in flight
-                        # we don't know if they're already queued up for transit
-                        # in a gather_dep callback
-                        "flight",
-                        # The same is true for already executing keys.
-                        "executing",
-                    )
-                    # If the scheduler holds a reference which is usually the
-                    # case when it instructed the task to be computed here or if
-                    # data was scattered we must not release it unless the
-                    # scheduler allow us to. See also handle_delete_data and
-                    and not dependency.scheduler_holds_ref
+                if not dependency.dependents and dependency.state not in (
+                    # don't boot keys that are in flight
+                    # we don't know if they're already queued up for transit
+                    # in a gather_dep callback
+                    "flight",
+                    # The same is true for already executing keys.
+                    "executing",
                 ):
                     self.release_key(dependency.key, reason=f"Dependent {ts} released")
 
@@ -2586,10 +2647,18 @@ class Worker(ServerNode):
                     for resource, quantity in ts.resource_restrictions.items():
                         self.available_resources[resource] += quantity
 
-            # Inform the scheduler of keys which will have gone missing
-            # We are releasing them before they have completed
-            if report and ts.state in PROCESSING:
-                self.batched_stream.send({"op": "release", "key": key, "cause": cause})
+            if report:
+                # Inform the scheduler of keys which will have gone missing
+                # We are releasing them before they have completed
+                if ts.state in PROCESSING:
+                    msg = {"op": "release", "key": key, "cause": cause}
+                else:
+                    msg = {
+                        "op": "release-worker-data",
+                        "keys": [key],
+                        "worker": self.address,
+                    }
+                self.batched_stream.send(msg)
 
             self._notify_plugins("release_key", key, ts.state, cause, reason, report)
             if key in self.tasks and not ts.dependents:
@@ -2938,7 +3007,7 @@ class Worker(ServerNode):
             elif isinstance(result.pop("actual-exception"), Reschedule):
                 self.batched_stream.send({"op": "reschedule", "key": ts.key})
                 self.transition(ts, "rescheduled", report=False)
-                self.release_key(ts.key, report=False)
+                self.release_key(ts.key, report=False, reason="Reschedule")
             else:
                 ts.exception = result["exception"]
                 ts.traceback = result["traceback"]
@@ -3243,11 +3312,14 @@ class Worker(ServerNode):
     def validate_task_flight(self, ts):
         assert ts.key not in self.data
         assert not any(dep.key in self.ready for dep in ts.dependents)
+        assert ts.coming_from
+        assert ts.coming_from in self.in_flight_workers
         assert ts.key in self.in_flight_workers[ts.coming_from]
 
     def validate_task_fetch(self, ts):
         assert ts.runspec is None
         assert ts.key not in self.data
+        assert self.address not in ts.who_has  #!!!!!!!!
         # FIXME This is currently not an invariant since upon comm failure we
         # remove the erroneous worker from all who_has and correct the state
         # upon the next ensure_communicate
@@ -3307,7 +3379,7 @@ class Worker(ServerNode):
                     # dependency can still be in `memory` before GC grabs it...?
                     # Might need better bookkeeping
                     assert dep.state is not None
-                    assert ts in dep.dependents
+                    assert ts in dep.dependents, ts
                 for key in ts.waiting_for_data:
                     ts_wait = self.tasks[key]
                     assert (
