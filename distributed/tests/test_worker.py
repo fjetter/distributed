@@ -753,7 +753,6 @@ async def test_log_exception_on_failed_task(c, s, a, b):
             logger.removeHandler(fh)
 
 
-@pytest.mark.flaky(reruns=10, reruns_delay=5)
 @gen_cluster(client=True)
 async def test_clean_up_dependencies(c, s, a, b):
     x = delayed(inc)(1)
@@ -765,15 +764,12 @@ async def test_clean_up_dependencies(c, s, a, b):
     zz = c.persist(z)
     await wait(zz)
 
-    start = time()
     while len(a.data) + len(b.data) > 1:
         await asyncio.sleep(0.01)
-        assert time() < start + 2
 
     assert set(a.data) | set(b.data) == {zz.key}
 
 
-@pytest.mark.flaky(reruns=10, reruns_delay=5)
 @gen_cluster(client=True)
 async def test_hold_onto_dependents(c, s, a, b):
     x = c.submit(inc, 1, workers=a.address)
@@ -783,9 +779,8 @@ async def test_hold_onto_dependents(c, s, a, b):
     assert x.key in b.data
 
     await c._cancel(y)
-    await asyncio.sleep(0.1)
-
-    assert x.key in b.data
+    while x.key not in b.data:
+        await asyncio.sleep(0.1)
 
 
 @pytest.mark.slow
@@ -1826,8 +1821,8 @@ async def test_story_with_deps(c, s, a, b):
         ),
         (key, "waiting", "ready"),
         (key, "ready", "executing"),
-        (key, "put-in-memory"),
         (key, "executing", "memory"),
+        (key, "put-in-memory"),
     ]
     assert story == expected_story
 

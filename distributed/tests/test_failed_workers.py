@@ -385,33 +385,161 @@ async def test_restart_during_computation(c, s, a, b):
     assert not s.tasks
 
 
-@gen_cluster(client=True, timeout=60)
+class SlowTransmitData:
+    def __init__(self, data, delay=0.1):
+        self.delay = delay
+        self.data = data
+
+    def __reduce__(self):
+        import time
+
+        time.sleep(self.delay)
+        return (SlowTransmitData, (self.delay,))
+
+    def __sizeof__(self) -> int:
+        # Ensure this is offloaded to avoid blocking loop
+        import dask
+        from dask.utils import parse_bytes
+
+        return parse_bytes(dask.config.get("distributed.comm.offload")) + 1
+
+
+def dump_everything(result_fut, s, a, b, extra={}):
+    from collections import deque
+
+    def _normalize(o, simple=False):
+        from distributed.scheduler import TaskState as TSScheduler
+        from distributed.scheduler import WorkerState
+        from distributed.worker import TaskState as TSWorker
+
+        if isinstance(o, dict):
+            return {
+                _normalize(k, simple=simple): _normalize(v, simple=simple)
+                for k, v in o.items()
+            }
+        elif isinstance(o, set):
+            return sorted([_normalize(el, simple=simple) for el in o])
+        elif isinstance(o, (deque, tuple, list)):
+            return [_normalize(el, simple=simple) for el in o]
+        elif isinstance(o, WorkerState):
+            return str(o)
+        elif isinstance(o, TSScheduler):
+            if simple:
+                # Due to cylcic references in the dependent/dependency graph
+                # mapping this causes an infinite recursion
+                return str(o)
+            base = {
+                "type": str(type(o)),
+                "repr": str(o),
+            }
+            base.update(
+                {
+                    s: _normalize(getattr(o, s), simple=True)
+                    for s in TSScheduler.__slots__
+                }
+            )
+            return base
+        elif isinstance(o, (TSWorker, TSScheduler)):
+            return str(o)
+        else:
+            return str(o)
+
+    now = str(time())
+    parent_dir = "/Users/fjetter/workspace/distributed-main/debug"
+
+    def dump_state(obj, filename):
+        workdir = os.path.join(parent_dir, now)
+        if not os.path.exists(workdir):
+            os.makedirs(workdir)
+
+        with open(os.path.join(workdir, filename), "w") as fd:
+            normalized = _normalize(obj)
+            # Don't use json since json bools are not python conform and formatters will be thrown off
+            output = str(normalized)
+            import black
+
+            output_formatted = black.format_str(
+                output,
+                mode=black.Mode(
+                    target_versions={black.TargetVersion.PY39},
+                    line_length=80,
+                ),
+            )
+            fd.write(output_formatted)
+
+    dump_state(extra, "extra.py")
+    dump_state(a.tasks, "a_tasks.py")
+    dump_state(a.log, "a_log.py")
+    dump_state(a.story(result_fut.key), "a_story.py")
+    dump_state(b.tasks, "b_tasks.py")
+    dump_state(b.log, "b_log.py")
+    dump_state(s.story(result_fut.key), "scheduler_story.py")
+    dump_state(s.transition_log, "scheduler_transition_log.py")
+    dump_state(s.log, "scheduler_log.py")
+    dump_state(s.events, "scheduler_events.py")
+    dump_state(s.tasks, "scheduler_tasks.py")
+
+
+@pytest.fixture
+def foo():
+    pass
+
+
+@gen_cluster(client=True)
+async def test_dump_everything(c, s, a, b):
+    futures = c.map(inc, range(10))
+    result_key = c.submit(sum, futures)
+
+    await wait(result_key)
+    dump_everything(result_key, s, a, b)
+
+
+@gen_cluster(client=True)
 async def test_worker_who_has_clears_after_failed_connection(c, s, a, b):
     n = await Nanny(s.address, nthreads=2, loop=s.loop)
+    n.auto_restart = False
 
     start = time()
     while len(s.nthreads) < 3:
         await asyncio.sleep(0.01)
         assert time() < start + 5
 
-    futures = c.map(slowinc, range(20), delay=0.01, key=["f%d" % i for i in range(20)])
-    await wait(futures)
-
-    result = await c.submit(sum, futures, workers=a.address)
-    deps = [dep for dep in a.tasks.values() if dep.key not in a.data_needed]
-    for dep in deps:
-        a.release_key(dep.key, report=True)
+    def slow_ser(x, delay):
+        return SlowTransmitData(x, delay=delay)
 
     n_worker_address = n.worker_address
+    futures = c.map(
+        slow_ser,
+        range(20),
+        delay=0.1,
+        key=["f%d" % i for i in range(20)],
+        workers=[n_worker_address],
+        allow_other_workers=True,
+    )
+
+    def sink(*args):
+        pass
+
+    await wait(futures)
+    result_fut = c.submit(sink, futures, workers=a.address)
+
     with suppress(CommClosedError):
         await c._run(os._exit, 1, workers=[n_worker_address])
 
     while len(s.workers) > 2:
         await asyncio.sleep(0.01)
 
-    total = c.submit(sum, futures, workers=a.address)
-    await total
+    try:
+        await asyncio.wait_for(result_fut, 10)
+    except asyncio.TimeoutError:
+        dump_everything(
+            result_fut, s, a, b, extra={"nanny_worker_addr": n_worker_address}
+        )
+        raise
 
+    # total = c.submit(sink, futures, workers=a.address)
+
+    # await total
     assert not a.has_what.get(n_worker_address)
     assert not any(n_worker_address in s for ts in a.tasks.values() for s in ts.who_has)
 
