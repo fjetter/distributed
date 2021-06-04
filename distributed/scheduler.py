@@ -2639,8 +2639,8 @@ class SchedulerState:
             # XXX factor this out?
             ts_nbytes: Py_ssize_t = ts.get_nbytes()
             worker_msg = {
-                "op": "release-task",
-                "key": key,
+                "op": "free-keys",
+                "keys": [key],
                 "reason": f"Memory->Released {key}",
             }
             for ws in ts._who_has:
@@ -2745,7 +2745,7 @@ class SchedulerState:
                 if dts._state == "erred":
                     recommendations[dts._key] = "waiting"
 
-            w_msg = {"op": "release-task", "key": key, "reason": "Erred->Released"}
+            w_msg = {"op": "free-keys", "keys": [key], "reason": "Erred->Released"}
             for w in ts._erred_on:
                 worker_msgs[w] = [w_msg]
             ts._erred_on.clear()
@@ -2820,7 +2820,7 @@ class SchedulerState:
             w: str = _remove_from_processing(self, ts)
             if w:
                 worker_msgs[w] = [
-                    {"op": "release-task", "key": key, "reason": "Processing->Released"}
+                    {"op": "free-keys", "keys": [key], "reason": "Processing->Released"}
                 ]
 
             ts.state = "released"
@@ -4478,7 +4478,7 @@ class Scheduler(SchedulerState, ServerNode):
             )
             if ws not in ts._who_has:
                 worker_msgs[worker] = [
-                    {"op": "release-task", "key": key, "reason": "Stimulus Finished"}
+                    {"op": "free-keys", "keys": [key], "reason": "Stimulus Finished"}
                 ]
 
         return recommendations, client_msgs, worker_msgs
@@ -5544,9 +5544,9 @@ class Scheduler(SchedulerState, ServerNode):
         parent: SchedulerState = cast(SchedulerState, self)
 
         await retry_operation(
-            self.rpc(addr=worker_address).release_many_keys,
+            self.rpc(addr=worker_address).free_keys,
             keys=list(keys),
-            reason="rebalance",
+            reason="rebalance/replicate",
         )
 
         ws: WorkerState = parent._workers_dv[worker_address]
@@ -6289,37 +6289,23 @@ class Scheduler(SchedulerState, ServerNode):
         if worker not in parent._workers_dv:
             return "not found"
         ws: WorkerState = parent._workers_dv[worker]
-        to_delete = []
+        superfluous_data = []
         for key in keys:
             ts: TaskState = parent._tasks.get(key)
-            if ts is not None and ts._state == "memory":  # in ("memory", "processing"):
+            if ts is not None and ts._state == "memory":
                 if ts not in ws._has_what:
                     ws._nbytes += ts.get_nbytes()
                     ws._has_what[ts] = None
                     ts._who_has.add(ws)
-            # elif ts is not None and ts._state == "processing":
-            #     # An unexpected worker finished the task. This may happen
-            #     # when... "TODO it's complicated"
-            #     # Submit all necessary metadata to worker such that the worker
-            #     # can claim ownership. It will respond with the proper
-            #     # task-finished message
-            #     # Edit: This approach is more brittle. Instead we let the
-            #     worker deal with the delete-data message and assign the
-            #     handler better defined semantics
-            #     self.handle_task_finished(ts.key, worker)
-            #     self.send_task_to_worker(worker, ts)
             else:
-                # self.transition_log.append((key, "add-key", "delete", {}, time()))
-
-                # self.log.append(("delete-data", ts, key, ws))
-                to_delete.append(key)
-        if to_delete:
+                superfluous_data.append(key)
+        if superfluous_data:
             self.worker_send(
                 worker,
                 {
-                    "op": "delete-data",
-                    "keys": to_delete,
-                    "reason": f"Tasks coming from {ws} are not supposed to be in memory",
+                    "op": "superfluous-data",
+                    "keys": superfluous_data,
+                    "reason": f"Add keys which are not in-memory {superfluous_data}",
                 },
             )
 
@@ -7350,8 +7336,8 @@ def _propagate_forgotten(
         if w in state._workers_dv:  # in case worker has died
             worker_msgs[w] = [
                 {
-                    "op": "release-task",
-                    "key": key,
+                    "op": "free-keys",
+                    "keys": [key],
                     "reason": f"propagate-forgotten {ts.key}",
                 }
             ]

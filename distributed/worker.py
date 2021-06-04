@@ -685,7 +685,7 @@ class Worker(ServerNode):
             "run_coroutine": self.run_coroutine,
             "get_data": self.get_data,
             "update_data": self.update_data,
-            "release_many_keys": self.release_many_keys,
+            "free_keys": self.free_keys_comm,
             "terminate": self.close,
             "ping": pingpong,
             "upload_file": self.upload_file,
@@ -706,8 +706,8 @@ class Worker(ServerNode):
         stream_handlers = {
             "close": self.close,
             "compute-task": self.add_task,
-            "release-task": self.release_task,
-            "delete-data": self.delete_data,
+            "free-keys": self.handle_free_keys,
+            "superfluous-data": self.handle_superfluous_data,
             "steal-request": self.steal_request,
         }
 
@@ -1490,21 +1490,49 @@ class Worker(ServerNode):
         info = {"nbytes": {k: sizeof(v) for k, v in data.items()}, "status": "OK"}
         return info
 
-    def release_many_keys(self, comm, keys, reason):
-        for k in keys:
-            # FIXME: Resolve ambiguity of names
-            self.release_task(k, reason=reason)
+    def free_keys_comm(self, comm, keys, reason):
+        """This is a comm handler calling `free_keys`"""
+        return self.handle_free_keys(keys, reason)
 
-    def release_task(self, key, reason):
-        ts = self.tasks.get(key)
-        if ts:
-            ts.scheduler_holds_ref = False
-        self.release_key(key, report=False, reason=reason)
+    def handle_free_keys(self, keys, reason):
+        """
+        Stream handler to be called by the scheduler.
 
-    def delete_data(self, keys=(), reason=None):
+        The given keys are no longer referred to and required by the scheduler.
+        The worker is now allowed to release the key, if applicable.
+
+        This does not guarantee that the memory is released since the worker may
+        still decide to hold on to the data and task since it is required by an
+        upstream dependency.
+        """
+        self.log.append(("free-keys", keys, reason))
+        for key in keys:
+            ts = self.tasks.get(key)
+            if ts:
+                ts.scheduler_holds_ref = False
+            self.release_key(key, report=False, reason=reason)
+
+    def handle_superfluous_data(self, keys=(), reason=None):
+        """Stream handler notifying the worker that it might be holding unreferenced, superfluous data.
+
+        This should not actually happen during ordinary operations and is only
+        intended to correct any erroneous state. An example where this is
+        necessary is if a worker fetches data for a downstream task but that
+        task is released before the data arrives.
+        In this case, the scheduler will notify the worker that it may be
+        holding this unnecessary data, if the worker hasn't released the data itself, already.
+
+        This handler does not guarantee the task nor the data to be actually
+        released but only asks the worker to release the data on a best effort
+        guarantee. This protects from race conditions where the given keys may
+        already have been rescheduled for compute in which case the compute
+        would win and this handler is ignored.
+
+        For stronger guarantees, see handler free_keys
+        """
         for key in list(keys):
             ts = self.tasks.get(key)
-            self.log.append((key, "delete", reason))
+            self.log.append((key, "nofity superfluous data", reason))
             if ts and not ts.scheduler_holds_ref:
                 self.release_key(key, reason=f"delete data: {reason}", report=False)
 
@@ -1972,7 +2000,6 @@ class Worker(ServerNode):
                     ts.state = "error"
                     out = "error"
 
-                # FIXME: At some point I required this to be gone. What happened?
                 # Don't release the dependency keys, but do remove them from `dependents`
                 for dependency in ts.dependencies:
                     dependency.dependents.discard(ts)
@@ -2142,6 +2169,7 @@ class Worker(ServerNode):
                     for d in to_gather:
                         dependencies_fetch.discard(self.tasks.get(d))
                         self.transition(self.tasks[d], "flight", worker=worker)
+                    assert not worker == self.address
                     self.loop.add_callback(
                         self.gather_dep,
                         worker=worker,
@@ -2421,6 +2449,9 @@ class Worker(ServerNode):
                         self.batched_stream.send(
                             {"op": "missing-data", "errant_worker": worker, "key": d}
                         )
+                        # TODO: What happens if we transition to fetch but the
+                        # task is in fact missing? and what is happening if it
+                        # is *not* missing?
                         self.transition(ts, "fetch")
                     elif ts.state not in ("ready", "memory"):
                         self.transition(ts, "fetch")
@@ -2511,7 +2542,7 @@ class Worker(ServerNode):
                             self.data_needed.append(dependent.key)
             if still_missing:
                 logger.critical(
-                    "Found self referencing who has response from scheduler. Trying again handle_missng"
+                    "Found self referencing who has response from scheduler. Trying again handle_missing"
                 )
                 await self.handle_missing_dep(*deps)
         except Exception:
