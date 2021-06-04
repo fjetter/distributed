@@ -89,7 +89,7 @@ jobs:
           fi
 
           source continuous_integration/scripts/set_ulimit.sh
-          pytest distributed/tests/test_worekr.py::test_clean_up_dependencies -m "not avoid_ci" --runslow
+          pytest distributed/tests/test_worker.py::test_clean_up_dependencies -m "not avoid_ci" --runslow
 
       # - name: Debug with tmate on failure
       #   if: ${{ failure() }}
