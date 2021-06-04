@@ -753,7 +753,11 @@ async def test_log_exception_on_failed_task(c, s, a, b):
             logger.removeHandler(fh)
 
 
-@gen_cluster(client=True)
+from distributed.utils_test import dump_everything
+
+
+@pytest.mark.parametrize("foo", range(1000))
+@gen_cluster(client=True, worker_kwargs={"memory_limit": "4GB"})
 async def test_clean_up_dependencies(c, s, a, b):
     x = delayed(inc)(1)
     y = delayed(inc)(2)
@@ -762,9 +766,29 @@ async def test_clean_up_dependencies(c, s, a, b):
     z = delayed(add)(xx, yy)
 
     zz = c.persist(z)
-    await wait(zz)
+    try:
+        await asyncio.wait_for(zz, 10)
+    except asyncio.TimeoutError:
+        print("Stuck in compute")
+        dump_everything(
+            zz,
+            s,
+            a,
+            b,
+        )
+        raise
+
+    start = time()
 
     while len(a.data) + len(b.data) > 1:
+        if time() - start > 10:
+            print("Stuck in data validate")
+            dump_everything(
+                zz,
+                s,
+                a,
+                b,
+            )
         await asyncio.sleep(0.01)
 
     assert set(a.data) | set(b.data) == {zz.key}

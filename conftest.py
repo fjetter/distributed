@@ -32,3 +32,8 @@ def pytest_collection_modifyitems(config, items):
 
 
 pytest_plugins = ["distributed.pytest_resourceleaks"]
+
+
+@pytest.fixture()
+def foo():
+    pass

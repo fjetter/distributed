@@ -875,7 +875,7 @@ def gen_cluster(
         if not iscoroutinefunction(func):
             func = gen.coroutine(func)
 
-        def test_func():
+        def test_func(foo):
             result = None
             workers = []
             with clean(timeout=active_rpc_timeout, **clean_kwargs) as loop:
@@ -1567,3 +1567,83 @@ class TaskStateMetadataPlugin(WorkerPlugin):
             ts.metadata["start_time"] = time()
         elif start == "executing" and finish == "memory":
             ts.metadata["stop_time"] = time()
+
+
+def dump_everything(result_fut, s, *workers, extra={}, directory=None):
+    from collections import deque
+
+    def _normalize(o, simple=False):
+        from distributed.scheduler import TaskState as TSScheduler
+        from distributed.scheduler import WorkerState
+        from distributed.worker import TaskState as TSWorker
+
+        if isinstance(o, dict):
+            return {
+                _normalize(k, simple=simple): _normalize(v, simple=simple)
+                for k, v in o.items()
+            }
+        elif isinstance(o, set):
+            return sorted([_normalize(el, simple=simple) for el in o])
+        elif isinstance(o, (deque, tuple, list)):
+            return [_normalize(el, simple=simple) for el in o]
+        elif isinstance(o, WorkerState):
+            return str(o)
+        elif isinstance(o, TSScheduler):
+            if simple:
+                # Due to cylcic references in the dependent/dependency graph
+                # mapping this causes an infinite recursion
+                return str(o)
+            base = {
+                "type": str(type(o)),
+                "repr": str(o),
+            }
+            base.update(
+                {
+                    s: _normalize(getattr(o, s), simple=True)
+                    for s in TSScheduler.__slots__
+                }
+            )
+            return base
+        elif isinstance(o, (TSWorker, TSScheduler)):
+            return str(o)
+        else:
+            return str(o)
+
+    now = str(time())
+
+    def dump_state(obj, filename, directory=None):
+        normalized = _normalize(obj)
+        # Don't use json since json bools are not python conform and formatters will be thrown off
+        output = str(normalized)
+        import black
+
+        output_formatted = black.format_str(
+            output,
+            mode=black.Mode(
+                target_versions={black.TargetVersion.PY39},
+                line_length=80,
+            ),
+        )
+        if directory:
+            workdir = os.path.join(directory, now)
+            if not os.path.exists(workdir):
+                os.makedirs(workdir)
+
+            with open(os.path.join(workdir, filename), "w") as fd:
+                fd.write(output_formatted)
+        else:
+            print(filename)
+            print(output_formatted)
+
+    dump_state(extra, "extra.py", directory=directory)
+    for w in workers:
+        dump_state(list(w.data), f"{w.name}_data.py", directory=directory)
+        dump_state(w.tasks, f"{w.name}_tasks.py", directory=directory)
+        dump_state(w.log, f"{w.name}_log.py", directory=directory)
+        dump_state(w.story(result_fut.key), f"{w.name}_story.py", directory=directory)
+
+    dump_state(s.story(result_fut.key), "scheduler_story.py", directory=directory)
+    dump_state(s.transition_log, "scheduler_transition_log.py", directory=directory)
+    dump_state(s.log, "scheduler_log.py", directory=directory)
+    dump_state(s.events, "scheduler_events.py", directory=directory)
+    dump_state(s.tasks, "scheduler_tasks.py", directory=directory)
