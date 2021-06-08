@@ -4,6 +4,11 @@ on: [push, pull_request]
 
 jobs:
   test:
+    defaults:
+      run:
+        # see https://github.com/conda-incubator/setup-miniconda/#important
+        shell: bash -l {0}
+
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -36,7 +41,6 @@ jobs:
           auto-activate-base: false
 
       - name: Install stacktrace
-        shell: bash -l {0}
         # stacktrace for Python 3.8 has not been released at the moment of writing
         if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version < '3.8' }}
         run: mamba install -c conda-forge -c defaults -c numba libunwind stacktrace
@@ -44,12 +48,10 @@ jobs:
       - name: Hack around https://github.com/ipython/ipython/issues/12197
         # This upstream issue causes an interpreter crash when running
         # distributed/protocol/tests/test_serialize.py::test_profile_nested_sizeof
-        shell: bash -l {0}
         if: ${{ matrix.os == 'windows-latest' && matrix.python-version == '3.9' }}
         run: mamba uninstall ipython
 
       - name: Install
-        shell: bash -l {0}
         run: |
           # Cythonize scheduler on Python 3.7 builds
           if [[ "${{ matrix.python-version }}" = "3.7" ]]; then
@@ -61,24 +63,24 @@ jobs:
           fi
 
       - name: mamba list
-        shell: bash -l {0}
         run: mamba list
 
       - name: mamba env export
-        shell: bash -l {0}
         run: |
           echo -e "--\n--Conda Environment (re-create this with \`mamba env create --name <name> -f <output_file>\`)\n--"
           mamba env export | grep -E -v '^prefix:.*$'
 
       - name: Setup SSH
-        shell: bash -l {0}
         # FIXME no SSH available on Windows
         # https://github.com/dask/distributed/issues/4509
         if: ${{ matrix.os != 'windows-latest' }}
         run: bash continuous_integration/scripts/setup_ssh.sh
 
+      - name: Coverage debug
+        run: |
+          python -c 'from coverage.tracer import CTracer'
+          coverage debug sys
       - name: Test
-        shell: bash -l {0}
         env:
           PYTHONFAULTHANDLER: 1
         run: |
@@ -89,7 +91,21 @@ jobs:
           fi
 
           source continuous_integration/scripts/set_ulimit.sh
-          pytest distributed -m "not avoid_ci" --runslow
+          if [[ "${{ matrix.os }}" = "ubuntu-latest" ]]; then
+            pytest distributed \
+              -m "not avoid_ci" \
+              --runslow \
+              --cov \
+              --cov-report=xml
+          else
+            pytest distributed \
+              -m "not avoid_ci" \
+              --runslow
+          fi
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v1
+        if: ${{ always() }}
 
       # - name: Debug with tmate on failure
       #   if: ${{ failure() }}
