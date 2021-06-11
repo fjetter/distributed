@@ -1790,6 +1790,7 @@ class Worker(ServerNode):
                 assert runspec is not None
 
             ts.runspec = runspec
+            ts.coming_from = None
 
             # remove any stale entries in `has_what`
             for worker in self.has_what.keys():
@@ -1846,6 +1847,8 @@ class Worker(ServerNode):
                 if dependent.state == "waiting":
                     self.data_needed.append(dependent.key)
 
+            if not ts.dependents:
+                self.release_key(ts)
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
@@ -2178,6 +2181,8 @@ class Worker(ServerNode):
                 if not dependencies_fetch and not in_flight:
                     self.data_needed.popleft()
 
+            if self.validate:
+                self.validate_state()
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
@@ -2306,10 +2311,9 @@ class Worker(ServerNode):
             Task we want to gather dependencies for
         """
 
-        if self.validate:
-            self.validate_state()
         if self.status != Status.running:
             return
+
         with log_errors():
             response = {}
             to_gather_keys = set()
@@ -2333,6 +2337,7 @@ class Worker(ServerNode):
                 )
 
                 start = time()
+
                 response = await get_data_from_worker(
                     self.rpc, to_gather_keys, worker, who=self.address
                 )
@@ -2340,10 +2345,6 @@ class Worker(ServerNode):
 
                 if response["status"] == "busy":
                     self.log.append(("busy-gather", worker, to_gather_keys))
-                    for key in to_gather_keys:
-                        ts = self.tasks.get(key)
-                        if ts and ts.state == "flight":
-                            self.transition(ts, "fetch")
                     return
 
                 cause.startstops.append(
@@ -2398,13 +2399,9 @@ class Worker(ServerNode):
                 self.log.append(("receive-dep", worker, list(response["data"])))
             except EnvironmentError:
                 logger.exception("Worker stream died during communication: %s", worker)
-                has_what = self.has_what.pop(worker)
-                self.pending_data_per_worker.pop(worker)
-                self.log.append(("receive-dep-failed", worker, has_what))
-                for d in has_what:
-                    ts = self.tasks[d]
-                    ts.who_has.remove(worker)
-
+                self.log.append(("comm failure gather_dep", cause.key, to_gather_keys))
+                # for key in self.has_what.pop(worker):
+                #     self.tasks[key].who_has.remove(worker)
             except Exception as e:
                 logger.exception(e)
                 if self.batched_stream and LOG_PDB:
@@ -2413,63 +2410,54 @@ class Worker(ServerNode):
                     pdb.set_trace()
                 raise
             finally:
-                self.comm_nbytes -= total_nbytes
-                busy = response.get("status", "") == "busy"
+                if self.validate:
+                    self.validate_state()
+
                 data = response.get("data", {})
-
-                # FIXME: We should not handle keys which were skipped by this coro. to_gather_keys is only a subset
-                assert set(to_gather_keys).issubset(
-                    set(self.in_flight_workers.get(worker))
-                )
-                for d in self.in_flight_workers.pop(worker):
-
+                busy = response.get("status") == "busy"
+                for d in to_gather_keys:
                     ts = self.tasks.get(d)
-
-                    if not busy and d in data:
-                        self.transition(ts, "memory", value=data[d])
-                    elif ts is None or ts.state == "executing":
-                        self.log.append(("already-executing", d))
-                        self.release_key(d, reason="already executing at gather")
-                    elif ts.state == "flight" and not ts.dependents:
-                        self.log.append(("flight no-dependents", d))
-                        self.release_key(
-                            d, reason="In-flight task no longer has dependents."
-                        )
-                    elif (
-                        not busy
-                        and d not in data
-                        and ts.dependents
-                        and ts.state != "memory"
+                    if (
+                        # If the state is no longer "flight", _something_
+                        # happened during communication. _something_ is using
+                        # more recent information and takes precedence
+                        ts is None
+                        or ts.state != "flight"
                     ):
-                        ts.who_has.discard(worker)
-                        self.has_what[worker].discard(ts.key)
-                        self.log.append(("missing-dep", d))
-                        self.batched_stream.send(
-                            {"op": "missing-data", "errant_worker": worker, "key": d}
-                        )
-                        self.transition(ts, "fetch")
-                    elif ts.state not in ("ready", "memory"):
+                        continue
+                    elif d in data:
+                        self.transition(ts, "memory", value=data[d])
+                    elif busy:
                         self.transition(ts, "fetch")
                     else:
-                        logger.debug(
-                            "Unexpected task state encountered for %s after gather_dep"
+                        # Use discard since comm failures already cleared this
+                        ts.who_has.discard(worker)
+                        self.has_what.get(worker, set()).discard(ts.key)
+                        self.log.append(("missing-dep", cause.key, d))
+                        self.batched_stream.send(
+                            {
+                                "op": "missing-data",
+                                "errant_worker": worker,
+                                "key": d,
+                            }
                         )
+                        self.transition(ts, "fetch")
 
                 if self.validate:
                     self.validate_state()
 
-                await self.ensure_computing()
+                self.comm_nbytes -= total_nbytes
+                del self.in_flight_workers[worker]
 
-                if not busy:
-                    self.repetitively_busy = 0
-                    self.ensure_communicating()
-                else:
-                    # Exponential backoff to avoid hammering scheduler/worker
+                if busy:
                     self.repetitively_busy += 1
-                    await asyncio.sleep(0.100 * 1.5 ** self.repetitively_busy)
-
+                    await asyncio.sleep(0.1 * 1.5 ** self.repetitively_busy)
                     await self.query_who_has(*to_gather_keys)
-                    self.ensure_communicating()
+                else:
+                    self.repetitively_busy = 0
+
+                await self.ensure_computing()
+                self.ensure_communicating()
 
     def bad_dep(self, dep):
         exc = ValueError(
@@ -2928,6 +2916,10 @@ class Worker(ServerNode):
                     except Exception:
                         continue
                     self.transition(ts, "executing")
+
+            if self.validate:
+                self.validate_state()
+
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
@@ -3346,28 +3338,28 @@ class Worker(ServerNode):
         assert ts.key not in self.data
         assert not any(dep.key in self.ready for dep in ts.dependents)
         assert ts.coming_from
-        assert ts.coming_from in self.in_flight_workers
+        assert ts.coming_from in self.in_flight_workers, (
+            ts.coming_from,
+            self.in_flight_workers,
+        )
         assert ts.key in self.in_flight_workers[ts.coming_from]
 
     def validate_task_fetch(self, ts):
         assert ts.runspec is None
         assert ts.key not in self.data
-        assert self.address not in ts.who_has  #!!!!!!!!
-        # FIXME This is currently not an invariant since upon comm failure we
-        # remove the erroneous worker from all who_has and correct the state
-        # upon the next ensure_communicate
+        assert self.address not in ts.who_has
 
-        # if not ts.who_has:
-        #     # If we do not know who_has for a fetch task, it must be logged in
-        #     # the missing dep. There should be a handle_missing_dep running for
-        #     # all of these keys
+        if not ts.who_has:
+            # If we do not know who_has for a fetch task, it must be logged in
+            # the missing dep. There should be a handle_missing_dep running for
+            # all of these keys
 
-        #     assert ts.key in self._missing_dep_flight, (
-        #         ts.key,
-        #         self.story(ts),
-        #         self._missing_dep_flight.copy(),
-        #         self.in_flight_workers.copy(),
-        #     )
+            assert ts.key in self._missing_dep_flight, (
+                ts.key,
+                self.story(ts),
+                self._missing_dep_flight.copy(),
+                self.in_flight_workers.copy(),
+            )
         assert ts.dependents
 
         for w in ts.who_has:
@@ -3393,7 +3385,7 @@ class Worker(ServerNode):
                 import pdb
 
                 pdb.set_trace()
-            raise
+            raise AssertionError(f"Invalid task state for {ts}") from e
 
     def validate_state(self):
         if self.status != Status.running:
@@ -3403,7 +3395,7 @@ class Worker(ServerNode):
                 assert ts.state is not None
                 # check that worker has task
                 for worker in ts.who_has:
-                    assert ts.key in self.has_what[worker]
+                    assert ts.key in self.has_what[worker], ts
                 # check that deps have a set state and that dependency<->dependent links are there
                 for dep in ts.dependencies:
                     # self.tasks was just a dict of tasks
