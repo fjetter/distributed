@@ -1,12 +1,17 @@
 name: Cancel
 
 on:
+  push:
+    branches: main
+  pull_request:
+    branches: main
   schedule:
     - cron: "0 */24 * * *"
 
 jobs:
   stale:
-
+    runs-on: ubuntu-latest
+    steps:
     - name: Close Stale Issues
       uses: actions/stale@v3.0.19
       with:
