@@ -1,0 +1,17 @@
+name: Cancel
+
+on:
+  schedule:
+    - cron: "0 */24 * * *"
+
+jobs:
+  stale:
+
+    - name: Close Stale Issues
+      uses: actions/stale@v3.0.19
+      with:
+        # Never close, just label
+        days-before-close: -1
+        excempt-issue-labels: enhancement
+        debug-only: true
+        stale-issue-label: "Needs attention"
