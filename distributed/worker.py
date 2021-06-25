@@ -2380,7 +2380,9 @@ class Worker(ServerNode):
                         },
                         "total": total_bytes,
                         "bandwidth": bandwidth,
+                        "worker_bandwidth": self.bandwidth,
                         "who": worker,
+                        "time": time(),
                     }
                 )
                 if total_bytes > 1000000:
