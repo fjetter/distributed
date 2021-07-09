@@ -27,7 +27,8 @@ from distributed.utils_test import (
 )
 
 
-def test_submit_after_failed_worker_sync(loop):
+@pytest.mark.parametrize("foo", range(50))
+def test_submit_after_failed_worker_sync(loop, foo):
     with cluster() as (s, [a, b]):
         with Client(s["address"], loop=loop) as c:
             L = c.map(inc, range(10))

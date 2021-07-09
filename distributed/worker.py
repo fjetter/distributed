@@ -1793,6 +1793,7 @@ class Worker(ServerNode):
                 "thread": self.threads.get(ts.key),
                 "exception": ts.exception,
                 "traceback": ts.traceback,
+                "startstops": ts.startstops,
             }
         )
         ts.state = "error"
