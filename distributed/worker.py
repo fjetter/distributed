@@ -722,6 +722,7 @@ class Worker(ServerNode):
 
         stream_handlers = {
             "close": self.close,
+            "acquire-replica": self.handle_register_data_tasks,
             "compute-task": self.compute_task,
             "free-keys": self.handle_free_keys,
             "superfluous-data": self.handle_superfluous_data,
@@ -2419,8 +2420,6 @@ class Worker(ServerNode):
 
             workers = [w for w in ts.who_has if w not in self.in_flight_workers]
             if not workers:
-                # heapq.heappush(skipped_worker_in_flight, (ts.priority, ts.key))
-
                 skipped_worker_in_flight.append((ts.priority, ts.key))
                 continue
 
@@ -2449,21 +2448,8 @@ class Worker(ServerNode):
                 stimulus_id=stimulus_id,
             )
         else:
-            # TODO:
-            # 1. We need a list since heappop doesn't work on the generator of
-            #    heapq.merge. Is it faster if we were to insert all
-            #    skipped_worker_in_flight
-            #    elements and skipped_worker_in_flight is not a heap?
-            # 2. If we simply append to skipped, the skipped list is sorted. is
-            #    this smth we can abouse for faster merging?
-            # 3. We can replace heappop with a next call since the merge
-            #    iterator takes care of this. what about heappush?
-            # As long as #skipped << #data_needed this is faster than combine + heapify
             for el in skipped_worker_in_flight:
                 heapq.heappush(self.data_needed, el)
-            # self.data_needed = list(
-            #     heapq.merge(self.data_needed, skipped_worker_in_flight)
-            # )
 
     def send_task_state_to_scheduler(self, ts):
         if ts.key in self.data or self.actors.get(ts.key):

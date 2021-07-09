@@ -2349,3 +2349,60 @@ async def test_hold_on_to_replicas(c, s, *workers):
 
     while len(workers[2].tasks) > 1:
         await asyncio.sleep(0.01)
+
+
+@gen_cluster(client=True)
+async def test_put_task_on_worker_without_dependent(c, s, a, b):
+    fut = c.submit(inc, 1, workers=[a.address])
+    await fut
+
+    s.stream_comms[b.address].send(
+        {
+            "op": "acquire-replica",
+            "keys": [fut.key],
+            "stimulus_id": "foo",
+            "priorities": {fut.key: s.tasks[fut.key].priority},
+            "who_has": {fut.key: {w.address for w in s.tasks[fut.key].who_has}},
+        }
+    )
+
+    while not b.tasks:
+        await asyncio.sleep(0.005)
+
+    assert len(s.who_has[fut.key]) == 2
+
+    fut.release()
+
+    while b.tasks or a.tasks:
+        await asyncio.sleep(0.005)
+
+
+@gen_cluster(client=True, timeout=4000)
+async def test_acquire_replica_same_channel(c, s, a, b):
+    fut = c.submit(inc, 1, workers=[a.address], key="f-replica")
+    futB = c.submit(inc, 2, workers=[a.address], key="f-B")
+    futC = c.submit(inc, futB, workers=[b.address], key="f-C")
+    await fut
+
+    s.stream_comms[b.address].send(
+        {
+            "op": "acquire-replica",
+            "keys": [fut.key],
+            "stimulus_id": "foo",
+            "priorities": {fut.key: s.tasks[fut.key].priority},
+            "who_has": {fut.key: {w.address for w in s.tasks[fut.key].who_has}},
+        }
+    )
+
+    await futC
+    while fut.key not in b.tasks:
+        await asyncio.sleep(0.005)
+    assert len(s.who_has[fut.key]) == 2
+
+    # Ensure that both the replica and an ordinary dependency pass through the
+    # same communication channel
+
+    for f in [fut, futB]:
+        assert any(("request-dep" in msg for msg in b.story(f.key)))
+        assert any(("gather-dependencies" in msg for msg in b.story(f.key)))
+        assert any((f.key in msg["keys"] for msg in b.incoming_transfer_log))
