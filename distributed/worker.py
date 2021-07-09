@@ -2439,9 +2439,12 @@ class Worker(ServerNode):
             #    this smth we can abouse for faster merging?
             # 3. We can replace heappop with a next call since the merge
             #    iterator takes care of this. what about heappush?
-            self.data_needed = list(
-                heapq.merge(self.data_needed, skipped_worker_in_flight)
-            )
+            # As long as #skipped << #data_needed this is faster than combine + heapify
+            for el in skipped_worker_in_flight:
+                heapq.heappush(self.data_needed, el)
+            # self.data_needed = list(
+            #     heapq.merge(self.data_needed, skipped_worker_in_flight)
+            # )
 
     def send_task_state_to_scheduler(self, ts):
         if ts.key in self.data or self.actors.get(ts.key):
@@ -2590,6 +2593,13 @@ class Worker(ServerNode):
                         to_gather_keys.add(dependency_key)
                 # Keep namespace clean since this func is long and has many
                 # dep*, *ts* variables
+
+                # This is awkward, see FIXME below
+                for dep_key in to_gather:
+                    dep_ts = self.tasks[dep_key]
+                    for dependent in dep_ts.dependents:
+                        cause = dependent
+                        break
                 del to_gather, dependency_key, dependency_ts
 
                 self.log.append(("request-dep", cause.key, worker, to_gather_keys))
@@ -2612,15 +2622,15 @@ class Worker(ServerNode):
                 # It didn't make much sense before since not all of the tasks
                 # fetched in this coro are even dependencies of `cause` but are
                 # simply co-located
-
-                # cause.startstops.append(
-                #     {
-                #         "action": "transfer",
-                #         "start": start + self.scheduler_delay,
-                #         "stop": stop + self.scheduler_delay,
-                #         "source": worker,
-                #     }
-                # )
+                if cause:
+                    cause.startstops.append(
+                        {
+                            "action": "transfer",
+                            "start": start + self.scheduler_delay,
+                            "stop": stop + self.scheduler_delay,
+                            "source": worker,
+                        }
+                    )
 
                 total_bytes = sum(
                     self.tasks[key].get_nbytes()
