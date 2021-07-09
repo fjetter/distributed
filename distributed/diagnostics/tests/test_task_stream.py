@@ -11,6 +11,7 @@ from distributed.metrics import time
 from distributed.utils_test import div, gen_cluster, inc, slowinc
 
 
+@pytest.mark.xfail(reason="TODO")
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 3)
 async def test_TaskStreamPlugin(c, s, *workers):
     es = TaskStreamPlugin(s)
