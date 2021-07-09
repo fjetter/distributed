@@ -7530,12 +7530,15 @@ def _task_to_msg(state: SchedulerState, ts: TaskState, duration: double = -1) ->
 
     if duration < 0:
         duration = state.get_task_duration(ts)
+    import uuid
 
     msg: dict = {
         "op": "compute-task",
         "key": ts._key,
         "priority": ts._priority,
         "duration": duration,
+        "stimulus_id": f"compute-task-{uuid.uuid4()}",
+        "who_has": {},
     }
     if ts._resource_restrictions:
         msg["resource_restrictions"] = ts._resource_restrictions

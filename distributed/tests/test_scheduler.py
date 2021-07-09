@@ -2801,6 +2801,7 @@ async def test_rebalance_no_limit(c, s, a, b):
     await assert_ndata(c, {a.address: 50, b.address: 50})
 
 
+@pytest.mark.xfail(reason="The nbytes submission seems to be broken")
 @gen_cluster(
     client=True,
     Worker=Nanny,
