@@ -478,6 +478,7 @@ class Worker(ServerNode):
             ("executing", "memory"): self.transition_executing_memory__recs,
             ("executing", "error"): self.transition_executing_error__recs,
             ("memory", "released"): self.transition_memoery_released__recs,
+            ("flight", "released"): self.transition_flight_released__recs,
             ("executing", "long-running"): self.transition_executing_long_running__recs,
             ("fetch", "released"): self.transition_fetch_released__recs,
         }
@@ -1859,6 +1860,22 @@ class Worker(ServerNode):
         heapq.heappush(self.data_needed, (ts.priority, ts.key))
 
         return {}, []
+
+    def transition_flight_released__recs(self, ts):
+        if self.validate:
+            assert ts.state == "flight"
+
+        ts.state = "released"
+        self.in_flight_tasks -= 1
+        ts.coming_from = None
+        recommendations = {}
+        scheduler_msgs = []
+
+        # TODO: I would like to cancel the fetch asyncio.task
+
+        # TODO: Do I need to account for a "forgotten" transition
+
+        return recommendations, scheduler_msgs
 
     def transition_fetch_released__recs(self, ts):
         if self.validate:
