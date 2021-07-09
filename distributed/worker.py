@@ -1944,6 +1944,7 @@ class Worker(ServerNode):
             a: tuple = func(ts, *args, **kwargs)
             self._transition_counter += 1
             recommendations, scheduler_msgs = a
+            self._notify_plugins("transition", ts.key, start, finish_state, **kwargs)
 
         elif default_state not in start_finish:
             try:
