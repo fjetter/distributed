@@ -274,23 +274,25 @@ class Server:
                 # This guard needs to be included by the lock to avoid having
                 # coros waiting in the lock while the server is being closed
                 if self.status in (Status.closing, Status.closed):
-                    # We should never await an object which is already closing but
-                    # we should also not start it up again otherwise we'd produce
-                    # zombies
+                    # We should never await an object which is already closing
+                    # but we should also not start it up again otherwise we'd
+                    # produce zombies
                     await self.finished()
                     return
-                if timeout:
-                    try:
-                        await asyncio.wait_for(self.start(), timeout=timeout)
-                    except Exception:
-                        await self.close(timeout=1)
-                        raise TimeoutError(
-                            "{} failed to start in {} seconds".format(
-                                type(self).__name__, timeout
-                            )
+                try:
+                    await asyncio.wait_for(self.start(), timeout=timeout)
+                except Exception:
+                    with suppress(TimeoutError):
+                        # This timeout here is artificial but should be longer
+                        # than 1 sec. The close method itself has multiple
+                        # waiting periods which easily accumulate to more than
+                        # 1s even in working-as-expected scenarios.
+                        await asyncio.wait_for(self.close(), timeout=2)
+                    raise TimeoutError(
+                        "{} failed to start in {} seconds".format(
+                            type(self).__name__, timeout
                         )
-                else:
-                    await self.start()
+                    )
             return self
 
         return _().__await__()
