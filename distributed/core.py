@@ -268,15 +268,17 @@ class Server:
             if self.status == Status.running:
                 return self
 
-            if self.status in (Status.closing, Status.closed):
-                # We should never await an object which is already closing but
-                # we should also not start it up again otherwise we'd produce
-                # zombies
-                await self.finished()
-                return
-
             timeout = getattr(self, "death_timeout", 0)
             async with self._startup_lock:
+
+                # This guard needs to be included by the lock to avoid having
+                # coros waiting in the lock while the server is being closed
+                if self.status in (Status.closing, Status.closed):
+                    # We should never await an object which is already closing but
+                    # we should also not start it up again otherwise we'd produce
+                    # zombies
+                    await self.finished()
+                    return
                 if timeout:
                     try:
                         await asyncio.wait_for(self.start(), timeout=timeout)
