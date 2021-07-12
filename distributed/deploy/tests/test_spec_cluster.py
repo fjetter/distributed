@@ -415,6 +415,9 @@ class MultiWorker(Worker, ProcessInterface):
 
     __repr__ = __str__
 
+    def __await__(self):
+        return self.start().__await__()
+
     async def start(self):
         await asyncio.gather(*self.workers)
 
