@@ -566,7 +566,7 @@ async def test_memory_limit_auto():
 
 
 @pytest.mark.timeout(30000)
-@gen_cluster(client=True, timeout=None)
+@gen_cluster(client=True)
 async def test_inter_worker_communication(c, s, a, b):
     [x, y] = await c._scatter([1, 2], workers=a.address)
 
@@ -601,7 +601,7 @@ async def test_clean(c, s, a, b):
 
 
 @pytest.mark.timeout(3000)
-@gen_cluster(client=True, timeout=None)
+@gen_cluster(client=True)
 async def test_message_breakup(c, s, a, b):
     n = 100000
     a.target_message_size = 10 * n
