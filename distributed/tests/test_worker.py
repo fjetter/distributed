@@ -2366,10 +2366,12 @@ async def test_put_task_on_worker_without_dependent(c, s, a, b):
         }
     )
 
-    while not b.tasks:
+    while not len(s.who_has[fut.key]) == 2:
         await asyncio.sleep(0.005)
 
-    assert len(s.who_has[fut.key]) == 2
+    for w in [a, b]:
+        assert fut.key in w.tasks
+        assert w.tasks[fut.key].state == "memory"
 
     fut.release()
 

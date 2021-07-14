@@ -27,8 +27,7 @@ from distributed.utils_test import (
 )
 
 
-@pytest.mark.parametrize("foo", range(50))
-def test_submit_after_failed_worker_sync(loop, foo):
+def test_submit_after_failed_worker_sync(loop):
     with cluster() as (s, [a, b]):
         with Client(s["address"], loop=loop) as c:
             L = c.map(inc, range(10))
@@ -543,7 +542,7 @@ class SlowDeserialize:
         import dask
         from dask.utils import parse_bytes
 
-        return parse_bytes(dask.config.get("distributed.comm.offload")) + 1
+        return parse_bytes(dask.config.get("distributed.comm.offload")) + int(1e6)
 
 
 @gen_cluster(client=True)
@@ -596,6 +595,9 @@ async def test_handle_superfluous_data(c, s, a, b):
     # in memory which exposes us to a race condition on B if B also receives the
     # signal to compute that task in the meantime.
     s.handle_missing_data(key=dep_key, errant_worker=a.address)
+    # FIXME: This test does not assert that an add-keys signal was submitted to
+    # the scheduler which is a requirement to trigger the deadlock situation.
+    # therefore the test may not fail reliably
     await red
 
 
