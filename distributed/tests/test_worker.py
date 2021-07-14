@@ -707,7 +707,6 @@ async def test_gather_many_small(c, s, a, *workers):
     assert a.comm_nbytes == 0
 
 
-@pytest.mark.skip(reason="startstops not implemented yet")
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 3)
 async def test_multiple_transfers(c, s, w1, w2, w3):
     x = c.submit(inc, 1, workers=w1.address)
@@ -716,9 +715,13 @@ async def test_multiple_transfers(c, s, w1, w2, w3):
 
     await wait(z)
 
-    r = w3.tasks[z.key].startstops
-    transfers = [t for t in r if t["action"] == "transfer"]
+    transfers = w3.incoming_transfer_log
     assert len(transfers) == 2
+    assert sum(map(len, pluck("keys", w3.incoming_transfer_log))) == 2
+
+    for key in [x.key, y.key]:
+        assert len(w3.tasks[key].startstops) == 1
+        assert w3.tasks[key].startstops[0]["action"] == "transfer"
 
 
 @pytest.mark.xfail(reason="very high flakiness")
@@ -1747,7 +1750,6 @@ async def test_bad_local_directory(cleanup):
         assert not any("error" in log for log in s.get_logs())
 
 
-@pytest.mark.skip()
 @pytest.mark.asyncio
 async def test_taskstate_metadata(cleanup):
 
@@ -1804,7 +1806,6 @@ async def test_story(c, s, w):
     assert w.story(ts) == w.story(ts.key)
 
 
-@pytest.mark.skip(reason="story changed")
 @gen_cluster(client=True)
 async def test_story_with_deps(c, s, a, b):
     """
@@ -1820,32 +1821,74 @@ async def test_story_with_deps(c, s, a, b):
     assert story == []
     story = b.story(key)
 
+    pruned_story = []
+    stimulus_ids = set()
+    for msg in story:
+        assert isinstance(msg, tuple), msg
+        assert isinstance(msg[-1], float), msg
+        assert msg[-1] > time() - 60, msg
+        pruned_msg = list(msg)
+        stimulus_ids.add(msg[-2])
+        pruned_story.append(tuple(pruned_msg[:-2]))
+
+    # FIXME should be four but put-in-memory is not done yet
+    assert len(stimulus_ids) == 5
+    stimulus_id = pruned_story[0][-1]
+    assert isinstance(stimulus_id, str)
+    assert stimulus_id.startswith("compute-task")
+    # This is a simple transition log
     expected_story = [
-        (key, "new"),
-        (key, "new", "waiting"),
-        # First log is what needs to be fetched in total as determined in
-        # ensure_communicating
+        (key, "compute-task"),
+        (key, "released", "waiting", {}),
+        (key, "waiting", "ready", {}),
+        (key, "ready", "executing", {}),
+        (key, "put-in-memory"),
+        (key, "executing", "memory", {}),
+    ]
+    assert pruned_story == expected_story
+
+    dep_story = futures[-1].key
+
+    story = b.story(dep_story)
+    pruned_story = []
+    stimulus_ids = set()
+    for msg in story:
+        assert isinstance(msg, tuple), msg
+        assert isinstance(msg[-1], float), msg
+        assert msg[-1] > time() - 60, msg
+        pruned_msg = list(msg)
+        stimulus_ids.add(msg[-2])
+        pruned_story.append(tuple(pruned_msg[:-2]))
+
+    assert len(stimulus_ids) == 5
+    stimulus_id = pruned_story[0][-1]
+    assert isinstance(stimulus_id, str)
+    expected_story = [
+        (dep_story, "register-replica"),
+        (dep_story, "released", "fetch", {}),
         (
             "gather-dependencies",
-            key,
-            {fut.key for fut in futures},
+            a.address,
+            {f.key for f in futures},
         ),
-        # Second log may just be a subset of the above, see also
-        # Worker.select_keys_for_gather
-        # This case, it's all because Worker.target_message_size is sufficiently
-        # large
+        (dep_story, "fetch", "flight", {}),
         (
             "request-dep",
-            key,
             a.address,
-            {fut.key for fut in futures},
+            {f.key for f in futures},
         ),
-        (key, "waiting", "ready"),
-        (key, "ready", "executing"),
-        (key, "executing", "memory"),
-        (key, "put-in-memory"),
+        (
+            "receive-dep",
+            a.address,
+            {f.key for f in futures},
+        ),
+        (dep_story, "put-in-memory"),
+        ("Notifying scheduler about in-memory", dep_story),
     ]
-    assert story == expected_story
+    # No way to say for sure which task will trigger the follow up transition
+    # therefore the log is not deterministic
+    assert list(pruned_story[-1])[:3] == [dep_story, "flight", "memory"]
+    assert pruned_story[:-1] == expected_story
 
 
 @gen_cluster(client=True)

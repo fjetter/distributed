@@ -724,7 +724,7 @@ class Worker(ServerNode):
 
         stream_handlers = {
             "close": self.close,
-            "acquire-replica": self.handle_register_data_tasks,
+            "acquire-replica": self.handle_register_replica,
             "compute-task": self.compute_task,
             "free-keys": self.handle_free_keys,
             "superfluous-data": self.handle_superfluous_data,
@@ -1494,6 +1494,7 @@ class Worker(ServerNode):
             stimulus_id = "update-data"
         recommendations = {}
         scheduler_messages = []
+        startstops = {}
         for key, value in data.items():
             ts = self.tasks.get(key)
             if getattr(ts, "state", None) is not None:
@@ -1507,13 +1508,16 @@ class Worker(ServerNode):
             ts.scheduler_holds_ref = True
 
             self.log.append((key, "receive-from-scatter"))
+            startstops[ts.key] = ts.startstops
 
         if report:
 
             self.log.append(
                 ("Notifying scheduler about in-memory in update-data", list(data))
             )
-            scheduler_messages.append({"op": "add-keys", "keys": list(data)})
+            scheduler_messages.append(
+                {"op": "add-keys", "keys": list(data), "startstops": startstops}
+            )
         self.transitions(recommendations, stimulus_id=stimulus_id)
         for msg in scheduler_messages:
             self.batched_stream.send(msg)
@@ -1583,13 +1587,13 @@ class Worker(ServerNode):
     # Task Management #
     ###################
 
-    def handle_register_data_tasks(
+    def handle_register_replica(
         self, comm=None, keys=None, priorities=None, who_has=None, stimulus_id=None
     ):
         recommendations = {}
         scheduler_msgs = []
         for k in keys:
-            recs, s_msgs = self.register_data_task_internal(
+            recs, s_msgs = self.register_replica_internal(
                 k,
                 stimulus_id=stimulus_id,
                 priority=priorities[k],
@@ -1603,8 +1607,8 @@ class Worker(ServerNode):
             self.batched_stream.send(msg)
         self.transitions(recommendations, stimulus_id=stimulus_id)
 
-    def register_data_task_internal(self, key, priority, stimulus_id):
-        self.log.append((key, "register-data-task", stimulus_id))
+    def register_replica_internal(self, key, priority, stimulus_id):
+        self.log.append((key, "register-replica", stimulus_id, time()))
         if key in self.tasks:
             logger.debug(
                 "Data task already known %s",
@@ -1641,7 +1645,7 @@ class Worker(ServerNode):
         actor=False,
         annotations=None,
     ):
-        self.log.append((key, "compute-task", stimulus_id))
+        self.log.append((key, "compute-task", stimulus_id, time()))
         if key in self.tasks:
             logger.debug(
                 "Asked to compute an already known task %s",
@@ -1672,7 +1676,7 @@ class Worker(ServerNode):
         recommendations = {}
         scheduler_msgs = []
         for dependency, _ in who_has.items():
-            recs, s_msgs = self.register_data_task_internal(
+            recs, s_msgs = self.register_replica_internal(
                 key=dependency,
                 stimulus_id=stimulus_id,
                 priority=priority,
@@ -1939,8 +1943,16 @@ class Worker(ServerNode):
         ts.coming_from = None
         recommendations, scheduler_msgs = self.put_key_in_memory(ts, value)
         ts.state = "memory"
-        self.log.append(("Notifying scheduler about in-memory", ts.key))
-        scheduler_msgs.append({"op": "add-keys", "keys": [ts.key]})
+        self.log.append(
+            ("Notifying scheduler about in-memory", ts.key, "stimulus-TODO", time())
+        )
+        scheduler_msgs.append(
+            {
+                "op": "add-keys",
+                "keys": [ts.key],
+                "startstops": {ts.key: ts.startstops},
+            }
+        )
         return recommendations, scheduler_msgs
 
     def _transition(self, ts, finish, *, stimulus_id, **kwargs):
@@ -2201,7 +2213,13 @@ class Worker(ServerNode):
                     pass
 
             self.log.append(("Notifying scheduler about in-memory", ts.key))
-            self.batched_stream.send({"op": "add-keys", "keys": [ts.key]})
+            self.batched_stream.send(
+                {
+                    "op": "add-keys",
+                    "keys": [ts.key],
+                    "startstops": {ts.key: ts.startstops},
+                }
+            )
 
         except Exception as e:
             logger.exception(e)
@@ -2453,7 +2471,9 @@ class Worker(ServerNode):
 
             to_gather, total_nbytes = self.select_keys_for_gather(worker, ts.key)
 
-            self.log.append(("gather-dependencies", key, to_gather, worker))
+            self.log.append(
+                ("gather-dependencies", worker, to_gather, "stimulus", time())
+            )
 
             self.comm_nbytes += total_nbytes
             self.in_flight_workers[worker] = to_gather
@@ -2554,7 +2574,8 @@ class Worker(ServerNode):
             if not dep.waiting_for_data:
                 recommendations[dep] = "ready"
 
-        self.log.append((ts.key, "put-in-memory"))
+        # TODO: third element should be a stimulus_id
+        self.log.append((ts.key, "put-in-memory", "put-in-memory", time()))
         return recommendations, []
 
     def select_keys_for_gather(self, worker, dep):
@@ -2619,7 +2640,9 @@ class Worker(ServerNode):
                         break
                 del to_gather, dependency_key, dependency_ts
 
-                self.log.append(("request-dep", worker, to_gather_keys))
+                self.log.append(
+                    ("request-dep", worker, to_gather_keys, stimulus_id, time())
+                )
                 logger.debug(
                     "Request %d keys for task %s from %s",
                     len(to_gather_keys),
@@ -2635,27 +2658,26 @@ class Worker(ServerNode):
                 if response["status"] == "busy":
                     return
 
-                # FIXME: With the changed system this no longer makes any sense
-                # It didn't make much sense before since not all of the tasks
-                # fetched in this coro are even dependencies of `cause` but are
-                # simply co-located
-                # for d in to_gather_keys:
-                #     ts = self.tasks.get(d)
-                #     if ts:
-                #         ts.startstops.append(
-                #             {
-                #                 "action": "transfer",
-                #                 "start": start + self.scheduler_delay,
-                #                 "stop": stop + self.scheduler_delay,
-                #                 "source": worker,
-                #             }
-                #         )
+                data = {k: v for k, v in response["data"].items() if k in self.tasks}
+                lost_keys = set(response["data"]) - set(data)
 
-                total_bytes = sum(
-                    self.tasks[key].get_nbytes()
-                    for key in response["data"]
-                    if key in self.tasks
-                )
+                if lost_keys:
+                    self.log.append(("lost-during-gather", lost_keys, stimulus_id))
+
+                total_bytes = sum(self.tasks[key].get_nbytes() for key in data)
+
+                for d in data:
+                    ts = self.tasks[d]
+                    ts.startstops.append(
+                        {
+                            "action": "transfer",
+                            "start": start + self.scheduler_delay,
+                            "stop": stop + self.scheduler_delay,
+                            "source": worker,
+                            "total": total_bytes,
+                            "nbytest": ts.nbytes,
+                        }
+                    )
                 duration = (stop - start) or 0.010
                 bandwidth = total_bytes / duration
                 self.incoming_transfer_log.append(
@@ -2664,11 +2686,7 @@ class Worker(ServerNode):
                         "stop": stop + self.scheduler_delay,
                         "middle": (start + stop) / 2.0 + self.scheduler_delay,
                         "duration": duration,
-                        "keys": {
-                            key: self.tasks[key].nbytes
-                            for key in response["data"]
-                            if key in self.tasks
-                        },
+                        "keys": {key: self.tasks[key].nbytes for key in data},
                         "total": total_bytes,
                         "bandwidth": bandwidth,
                         "who": worker,
@@ -2691,13 +2709,17 @@ class Worker(ServerNode):
                 self.counters["transfer-count"].add(len(response["data"]))
                 self.incoming_count += 1
 
-                self.log.append(("receive-dep", worker, list(response["data"])))
+                self.log.append(
+                    ("receive-dep", worker, set(response["data"]), stimulus_id, time())
+                )
 
             except OSError:
                 logger.exception("Worker stream died during communication: %s", worker)
                 has_what = self.has_what.pop(worker)
                 self.pending_data_per_worker.pop(worker)
-                self.log.append(("receive-dep-failed", worker, has_what))
+                self.log.append(
+                    ("receive-dep-failed", worker, has_what, stimulus_id, time())
+                )
                 for d in has_what:
                     ts = self.tasks[d]
                     ts.who_has.remove(worker)
@@ -2723,7 +2745,9 @@ class Worker(ServerNode):
                 deps_to_iter = self.in_flight_workers.pop(worker)
 
                 if busy:
-                    self.log.append(("busy-gather", worker, to_gather_keys))
+                    self.log.append(
+                        ("busy-gather", worker, to_gather_keys, stimulus_id, time())
+                    )
 
                 for d in deps_to_iter:
 

@@ -6427,7 +6427,7 @@ class Scheduler(SchedulerState, ServerNode):
 
                 return worker_keys
 
-    def add_keys(self, comm=None, worker=None, keys=()):
+    def add_keys(self, comm=None, worker=None, keys=(), startstops=None):
         """
         Learn that a worker has certain keys
 
@@ -6446,6 +6446,16 @@ class Scheduler(SchedulerState, ServerNode):
                     ws._nbytes += ts.get_nbytes()
                     ws._has_what[ts] = None
                     ts._who_has.add(ws)
+
+                if startstops:
+                    startstop: dict
+                    for startstop in startstops[key]:
+                        stop = startstop["stop"]
+                        start = startstop["start"]
+                        action = startstop["action"]
+
+                        ts._prefix._all_durations[action] += stop - start
+                        ts._group._all_durations[action] += stop - start
             else:
                 superfluous_data.append(key)
         if superfluous_data:
