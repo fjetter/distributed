@@ -92,9 +92,6 @@ class SchedulerPlugin:
     def remove_client(self, scheduler=None, client=None, **kwargs):
         """Run when a client disconnects"""
 
-    def add_keys(self, worker, taskstates):
-        """Run when a replica is registered"""
-
 
 class WorkerPlugin:
     """Interface to extend the Worker

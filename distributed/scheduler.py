@@ -6427,7 +6427,7 @@ class Scheduler(SchedulerState, ServerNode):
 
                 return worker_keys
 
-    def add_keys(self, comm=None, worker=None, taskstates=None):
+    def add_keys(self, comm=None, worker=None, keys=()):
         """
         Learn that a worker has certain keys
 
@@ -6438,38 +6438,24 @@ class Scheduler(SchedulerState, ServerNode):
         if worker not in parent._workers_dv:
             return "not found"
         ws: WorkerState = parent._workers_dv[worker]
-        superfluous_data = []
-        for key in taskstates:
+        redundant_replicas = []
+        for key in keys:
             ts: TaskState = parent._tasks.get(key)
             if ts is not None and ts._state == "memory":
                 if ts not in ws._has_what:
                     ws._nbytes += ts.get_nbytes()
                     ws._has_what[ts] = None
                     ts._who_has.add(ws)
-                if taskstates[key]:
-                    startstops = taskstates[key].get("startstops", {})
-                    startstop: dict
-                    for startstop in startstops:
-                        stop = startstop["stop"]
-                        start = startstop["start"]
-                        action = startstop["action"]
-
-                        ts._prefix._all_durations[action] += stop - start
-                        ts._group._all_durations[action] += stop - start
             else:
-                superfluous_data.append(key)
-        for plugin in list(self.plugins):
-            try:
-                plugin.add_keys(worker=worker, taskstates=taskstates)
-            except Exception:
-                logger.info("Plugin failed with exception", exc_info=True)
-        if superfluous_data:
+                redundant_replicas.append(key)
+
+        if redundant_replicas:
             self.worker_send(
                 worker,
                 {
-                    "op": "superfluous-data",
-                    "keys": superfluous_data,
-                    "reason": f"Add keys which are not in-memory {superfluous_data}",
+                    "op": "remove-replicas",
+                    "keys": redundant_replicas,
+                    "reason": f"Add keys which are not in-memory {redundant_replicas}",
                 },
             )
 

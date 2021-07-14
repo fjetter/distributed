@@ -188,7 +188,7 @@ class TaskState:
         self.metadata = {}
         self.nbytes = None
         self.annotations = None
-        self.scheduler_holds_ref = False
+        self.protected = False
 
     def __repr__(self):
         return f"<Task {self.key!r} {self.state}>"
@@ -705,7 +705,7 @@ class Worker(ServerNode):
             "acquire-replica": self.handle_register_replica,
             "compute-task": self.compute_task,
             "free-keys": self.handle_free_keys,
-            "superfluous-data": self.handle_superfluous_data,
+            "remove-replicas": self.handle_remove_replicas,
             "steal-request": self.steal_request,
         }
 
@@ -1472,7 +1472,6 @@ class Worker(ServerNode):
             stimulus_id = "update-data"
         recommendations = {}
         scheduler_messages = []
-        startstops = {}
         for key, value in data.items():
             ts = self.tasks.get(key)
             if getattr(ts, "state", None) is not None:
@@ -1485,10 +1484,9 @@ class Worker(ServerNode):
                 scheduler_messages.extend(s_msgs)
                 ts.priority = None
                 ts.duration = None
-            ts.scheduler_holds_ref = True
+            ts.protected = True
 
             self.log.append((key, "receive-from-scatter"))
-            startstops[ts.key] = ts.startstops
 
         if report:
 
@@ -1498,11 +1496,7 @@ class Worker(ServerNode):
             scheduler_messages.append(
                 {
                     "op": "add-keys",
-                    "taskstates": {
-                        key: self.get_task_state_for_scheduler(self.tasks[key])
-                        for key in data
-                        if key in self.tasks
-                    },
+                    "keys": list(data),
                 }
             )
         self.transitions(recommendations, stimulus_id=stimulus_id)
@@ -1526,10 +1520,10 @@ class Worker(ServerNode):
         for key in keys:
             ts = self.tasks.get(key)
             if ts is not None:
-                ts.scheduler_holds_ref = False
+                ts.protected = False
                 self.release_key(key, report=False, reason=reason)
 
-    def handle_superfluous_data(self, keys=(), reason=None):
+    def handle_remove_replicas(self, keys=(), reason=None):
         """Stream handler notifying the worker that it might be holding unreferenced, superfluous data.
 
         This should not actually happen during ordinary operations and is only
@@ -1549,9 +1543,7 @@ class Worker(ServerNode):
         """
         self.log.append(("Handle superfluous data", keys, reason))
         for key in list(keys):
-            ts = self.tasks.get(key)
-            if ts and not ts.scheduler_holds_ref:
-                self.release_key(key, reason=f"delete data: {reason}", report=False)
+            self.release_key(key, reason=f"delete data: {reason}", report=False)
 
         logger.debug("Worker %s -- Deleted %d keys", self.name, len(keys))
         return "OK"
@@ -1655,7 +1647,7 @@ class Worker(ServerNode):
 
         ts.exception = None
         ts.traceback = None
-        ts.scheduler_holds_ref = True
+        ts.protected = True
         ts.priority = priority
         ts.duration = duration
         if resource_restrictions:
@@ -1742,7 +1734,7 @@ class Worker(ServerNode):
 
     def transition_memoery_released__recs(self, ts, *, stimulus_id):
         ts.state = "released"
-        ts.scheduler_holds_ref = False
+        ts.protected = False
         self.release_key(ts.key)
         return {}, []
 
@@ -1933,7 +1925,7 @@ class Worker(ServerNode):
         scheduler_msgs.append(
             {
                 "op": "add-keys",
-                "taskstates": {ts.key: self.get_task_state_for_scheduler(ts)},
+                "keys": [ts.key],
             }
         )
         return recommendations, scheduler_msgs
@@ -2165,7 +2157,7 @@ class Worker(ServerNode):
                 "status": "OK",
                 "key": ts.key,
                 "nbytes": ts.nbytes,
-                "thread": self.threads.get(ts.key, -1),
+                "thread": self.threads.get(ts.key, list(self.threads.values())[0]),
                 "type": typ_serialized,
                 "typename": typename(typ),
                 "metadata": ts.metadata,
@@ -2175,7 +2167,7 @@ class Worker(ServerNode):
                 "op": "task-erred",
                 "status": "error",
                 "key": ts.key,
-                "thread": self.threads.get(ts.key, -1),
+                "thread": self.threads.get(ts.key, list(self.threads.values())[0]),
                 "exception": ts.exception,
                 "traceback": ts.traceback,
             }
@@ -2285,7 +2277,7 @@ class Worker(ServerNode):
 
                 # This is awkward, see FIXME below
                 for dep_key in to_gather:
-                    dep_ts = self.tasks[dep_key]
+                    dep_ts = cause = self.tasks[dep_key]
                     for dependent in dep_ts.dependents:
                         cause = dependent
                         break
@@ -2317,16 +2309,13 @@ class Worker(ServerNode):
 
                 total_bytes = sum(self.tasks[key].get_nbytes() for key in data)
 
-                for d in data:
-                    ts = self.tasks[d]
-                    ts.startstops.append(
+                if cause:
+                    cause.startstops.append(
                         {
                             "action": "transfer",
                             "start": start + self.scheduler_delay,
                             "stop": stop + self.scheduler_delay,
                             "source": worker,
-                            "total": total_bytes,
-                            "nbytest": ts.nbytes,
                         }
                     )
                 duration = (stop - start) or 0.010
@@ -2584,7 +2573,7 @@ class Worker(ServerNode):
             # If task is marked as "constrained" we haven't yet assigned it an
             # `available_resources` to run on, that happens in
             # `transition_constrained_executing`
-            ts.scheduler_holds_ref = False
+            ts.protected = False
             self.release_key(ts.key, reason="stolen")
             if self.validate:
                 assert ts.key not in self.tasks
@@ -2605,7 +2594,7 @@ class Worker(ServerNode):
             # case when it instructed the task to be computed here or if
             # data was scattered we must not release it unless the
             # scheduler allow us to. See also handle_delete_data and
-            if ts is None or ts.scheduler_holds_ref:
+            if ts is None or ts.protected:
                 return
             logger.debug(
                 "Release key %s", {"key": key, "cause": cause, "reason": reason}
