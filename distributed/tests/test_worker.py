@@ -720,6 +720,7 @@ async def test_multiple_transfers(c, s, w1, w2, w3):
     assert sum(map(len, pluck("keys", w3.incoming_transfer_log))) == 2
 
     for key in [x.key, y.key]:
+        assert key in w3.tasks, w3.story(key)
         assert len(w3.tasks[key].startstops) == 1
         assert w3.tasks[key].startstops[0]["action"] == "transfer"
 
@@ -1831,8 +1832,7 @@ async def test_story_with_deps(c, s, a, b):
         stimulus_ids.add(msg[-2])
         pruned_story.append(tuple(pruned_msg[:-2]))
 
-    # FIXME should be four but put-in-memory is not done yet
-    assert len(stimulus_ids) == 5
+    assert len(stimulus_ids) == 3
     stimulus_id = pruned_story[0][-1]
     assert isinstance(stimulus_id, str)
     assert stimulus_id.startswith("compute-task")
@@ -1860,7 +1860,7 @@ async def test_story_with_deps(c, s, a, b):
         stimulus_ids.add(msg[-2])
         pruned_story.append(tuple(pruned_msg[:-2]))
 
-    assert len(stimulus_ids) == 5
+    assert len(stimulus_ids) == 3
     stimulus_id = pruned_story[0][-1]
     assert isinstance(stimulus_id, str)
     expected_story = [

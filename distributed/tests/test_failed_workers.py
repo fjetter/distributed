@@ -617,7 +617,9 @@ async def test_forget_data_not_supposed_to_have(s, a, b):
     ts = TaskState("key")
     ts.state = "flight"
     a.tasks["key"] = ts
-    a.transition_flight_memory(ts, value=123)
+    recommendations = {ts: ("memory", 123)}
+    a.transitions(recommendations, stimulus_id="test")
+
     assert a.data
     while a.data:
         await asyncio.sleep(0.001)

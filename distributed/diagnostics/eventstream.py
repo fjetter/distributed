@@ -21,6 +21,12 @@ class EventStream(SchedulerPlugin):
             if finish == "memory" or finish == "erred":
                 self.buffer.append(kwargs)
 
+    def add_keys(self, worker, taskstates):
+        for key in taskstates:
+            msg = taskstates[key].copy()
+            msg["worker"] = worker
+            self.buffer.append(msg)
+
 
 def swap_buffer(scheduler, es):
     es.buffer, buffer = [], es.buffer

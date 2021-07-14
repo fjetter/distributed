@@ -22,7 +22,7 @@ async def test_eventstream(c, s, *workers):
     await wait(total)
     await wait(futures)
 
-    assert len(es.buffer) == 11
+    assert len(es.buffer) == 17
 
     from distributed.diagnostics.progress_stream import task_stream_append
 
@@ -34,7 +34,7 @@ async def test_eventstream(c, s, *workers):
     for msg in es.buffer:
         task_stream_append(lists, msg, workers)
 
-    assert len([n for n in lists["name"] if n.startswith("transfer")]) == 2
+    assert len([n for n in lists["name"] if n.startswith("transfer")]) == 6
     for name, color in zip(lists["name"], lists["color"]):
         if name == "transfer":
             assert color == "red"

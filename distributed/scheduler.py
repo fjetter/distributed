@@ -6427,7 +6427,7 @@ class Scheduler(SchedulerState, ServerNode):
 
                 return worker_keys
 
-    def add_keys(self, comm=None, worker=None, keys=(), startstops=None):
+    def add_keys(self, comm=None, worker=None, taskstates=None):
         """
         Learn that a worker has certain keys
 
@@ -6439,17 +6439,17 @@ class Scheduler(SchedulerState, ServerNode):
             return "not found"
         ws: WorkerState = parent._workers_dv[worker]
         superfluous_data = []
-        for key in keys:
+        for key in taskstates:
             ts: TaskState = parent._tasks.get(key)
             if ts is not None and ts._state == "memory":
                 if ts not in ws._has_what:
                     ws._nbytes += ts.get_nbytes()
                     ws._has_what[ts] = None
                     ts._who_has.add(ws)
-
-                if startstops:
+                if taskstates[key]:
+                    startstops = taskstates[key].get("startstops", {})
                     startstop: dict
-                    for startstop in startstops[key]:
+                    for startstop in startstops:
                         stop = startstop["stop"]
                         start = startstop["start"]
                         action = startstop["action"]
@@ -6458,6 +6458,11 @@ class Scheduler(SchedulerState, ServerNode):
                         ts._group._all_durations[action] += stop - start
             else:
                 superfluous_data.append(key)
+        for plugin in list(self.plugins):
+            try:
+                plugin.add_keys(worker=worker, taskstates=taskstates)
+            except Exception:
+                logger.info("Plugin failed with exception", exc_info=True)
         if superfluous_data:
             self.worker_send(
                 worker,
@@ -7573,6 +7578,8 @@ def _task_to_msg(state: SchedulerState, ts: TaskState, duration: double = -1) ->
 
     if ts._annotations:
         msg["annotations"] = ts._annotations
+
+    assert "stimulus_id" in msg
     return msg
 
 
