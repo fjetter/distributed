@@ -1780,32 +1780,73 @@ async def test_story_with_deps(c, s, a, b):
     assert story == []
     story = b.story(key)
 
+    pruned_story = []
+    stimulus_ids = set()
+    for msg in story:
+        assert isinstance(msg, tuple), msg
+        assert isinstance(msg[-1], float), msg
+        assert msg[-1] > time() - 60, msg
+        pruned_msg = list(msg)
+        stimulus_ids.add(msg[-2])
+        pruned_story.append(tuple(pruned_msg[:-2]))
+
+    assert len(stimulus_ids) == 3
+    stimulus_id = pruned_story[0][-1]
+    assert isinstance(stimulus_id, str)
+    assert stimulus_id.startswith("compute-task")
+    # This is a simple transition log
     expected_story = [
-        (key, "new"),
-        (key, "new", "waiting"),
-        # First log is what needs to be fetched in total as determined in
-        # ensure_communicating
+        (key, "compute-task"),
+        (key, "released", "waiting", {}),
+        (key, "waiting", "ready", {}),
+        (key, "ready", "executing", {}),
+        (key, "put-in-memory"),
+        (key, "executing", "memory", {}),
+    ]
+    assert pruned_story == expected_story
+
+    dep_story = futures[-1].key
+
+    story = b.story(dep_story)
+    pruned_story = []
+    stimulus_ids = set()
+    for msg in story:
+        assert isinstance(msg, tuple), msg
+        assert isinstance(msg[-1], float), msg
+        assert msg[-1] > time() - 60, msg
+        pruned_msg = list(msg)
+        stimulus_ids.add(msg[-2])
+        pruned_story.append(tuple(pruned_msg[:-2]))
+
+    assert len(stimulus_ids) == 3
+    stimulus_id = pruned_story[0][-1]
+    assert isinstance(stimulus_id, str)
+    expected_story = [
+        (dep_story, "register-replica"),
+        (dep_story, "released", "fetch", {}),
         (
             "gather-dependencies",
-            key,
-            {fut.key for fut in futures},
+            a.address,
+            {f.key for f in futures},
         ),
-        # Second log may just be a subset of the above, see also
-        # Worker.select_keys_for_gather
-        # This case, it's all because Worker.target_message_size is sufficiently
-        # large
+        (dep_story, "fetch", "flight", {}),
         (
             "request-dep",
-            key,
             a.address,
-            {fut.key for fut in futures},
+            {f.key for f in futures},
         ),
-        (key, "waiting", "ready"),
-        (key, "ready", "executing"),
-        (key, "executing", "memory"),
-        (key, "put-in-memory"),
+        (
+            "receive-dep",
+            a.address,
+            {f.key for f in futures},
+        ),
+        (dep_story, "put-in-memory"),
+        ("Notifying scheduler about in-memory", dep_story),
     ]
-    assert story == expected_story
+    # No way to say for sure which task will trigger the follow up transition
+    # therefore the log is not deterministic
+    assert list(pruned_story[-1])[:3] == [dep_story, "flight", "memory"]
+    assert pruned_story[:-1] == expected_story
 
 
 @gen_cluster(client=True)
@@ -2417,3 +2458,214 @@ async def test_forget_dependents_after_release(c, s, a):
     while fut2.key in a.tasks:
         await asyncio.sleep(0.001)
     assert fut2.key not in {d.key for d in a.tasks[fut.key].dependents}
+
+
+def _acquire_replica(scheduler, worker, future):
+    if not isinstance(future, list):
+        keys = [future.key]
+    else:
+        keys = [f.key for f in future]
+
+    scheduler.stream_comms[worker.address].send(
+        {
+            "op": "acquire-replica",
+            "keys": keys,
+            "stimulus_id": time(),
+            "priorities": {key: scheduler.tasks[key].priority for key in keys},
+            "who_has": {
+                key: {w.address for w in scheduler.tasks[key].who_has} for key in keys
+            },
+        },
+    )
+
+
+def _remove_replica(scheduler, worker, future):
+    if not isinstance(future, list):
+        keys = [future.key]
+    else:
+        keys = [f.key for f in future]
+
+    scheduler.stream_comms[worker.address].send(
+        {
+            "op": "remove-replicas",
+            "keys": keys,
+            "stimulus_id": time(),
+        }
+    )
+
+
+@gen_cluster(client=True)
+async def test_acquire_replica(c, s, a, b):
+    fut = c.submit(inc, 1, workers=[a.address])
+    await fut
+
+    _acquire_replica(s, b, fut)
+
+    while not len(s.who_has[fut.key]) == 2:
+        await asyncio.sleep(0.005)
+
+    for w in [a, b]:
+        assert fut.key in w.tasks
+        assert w.tasks[fut.key].state == "memory"
+
+    fut.release()
+
+    while b.tasks or a.tasks:
+        await asyncio.sleep(0.005)
+
+
+@gen_cluster(client=True)
+async def test_acquire_replica_same_channel(c, s, a, b):
+    fut = c.submit(inc, 1, workers=[a.address], key="f-replica")
+    futB = c.submit(inc, 2, workers=[a.address], key="f-B")
+    futC = c.submit(inc, futB, workers=[b.address], key="f-C")
+    await fut
+
+    _acquire_replica(s, b, fut)
+
+    await futC
+    while fut.key not in b.tasks:
+        await asyncio.sleep(0.005)
+    assert len(s.who_has[fut.key]) == 2
+
+    # Ensure that both the replica and an ordinary dependency pass through the
+    # same communication channel
+
+    for f in [fut, futB]:
+        assert any(("request-dep" in msg for msg in b.story(f.key)))
+        assert any(("gather-dependencies" in msg for msg in b.story(f.key)))
+        assert any((f.key in msg["keys"] for msg in b.incoming_transfer_log))
+
+
+@gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 3)
+async def test_acquire_replica_many(c, s, *workers):
+    futs = c.map(inc, range(10), workers=[workers[0].address])
+    res = c.submit(sum, futs, workers=[workers[1].address])
+    final = c.submit(slowinc, res, delay=0.5, workers=[workers[1].address])
+
+    await wait(futs)
+
+    _acquire_replica(s, workers[2], futs)
+
+    # Worker 2 should normally not even be involved if there was no replication
+    while not all(
+        f.key in workers[2].tasks and workers[2].tasks[f.key].state == "memory"
+        for f in futs
+    ):
+        await asyncio.sleep(0.01)
+
+    assert all(ts.state == "memory" for ts in workers[2].tasks.values())
+
+    assert await final == sum(map(inc, range(10))) + 1
+    # All workers have a replica
+    assert all(len(s.tasks[f.key].who_has) == 3 for f in futs)
+    del futs, res, final
+
+    while any(w.tasks for w in workers):
+        await asyncio.sleep(0.001)
+
+
+@gen_cluster(client=True)
+async def test_remove_replica_simple(c, s, a, b):
+    futs = c.map(inc, range(10), workers=[a.address])
+    await wait(futs)
+    _acquire_replica(s, b, futs)
+
+    while not all(len(s.tasks[f.key].who_has) == 2 for f in futs):
+        await asyncio.sleep(0.01)
+
+    _remove_replica(s, b, futs)
+
+    while b.tasks:
+        await asyncio.sleep(0.01)
+
+    # might take a moment for the reply to reach the scheduler
+    while not all(len(s.tasks[f.key].who_has) == 1 for f in futs):
+        await asyncio.sleep(0.01)
+
+
+@gen_cluster(client=True)
+async def test_remove_replica_while_computing(c, s, *workers):
+    futs = c.map(inc, range(10), workers=[workers[0].address])
+
+    # All interesting things will happen on that worker
+    w = workers[1]
+    intermediate = c.map(slowinc, futs, delay=0.1, workers=[w.address])
+
+    def reduce(*args, **kwargs):
+        import time
+
+        time.sleep(0.5)
+        return
+
+    final = c.submit(reduce, intermediate, workers=[w.address], key="final")
+    while final.key not in w.tasks:
+        await asyncio.sleep(0.001)
+
+    while not all(fut.done() for fut in intermediate):
+        # The worker should reject all of these since they are required
+        _remove_replica(s, w, futs)
+        _remove_replica(s, w, intermediate)
+        await asyncio.sleep(0.001)
+
+    await wait(intermediate)
+
+    # Since intermediate is done, futs replicas may be removed.
+    # They might be already gone due to the above remove replica calls
+    _remove_replica(s, w, futs)
+    # the intermediate tasks should not be touched because they are still needed
+    # (the scheduler should not have made the above call but we should be safe
+    # regarless)
+    assert all(w.tasks[f.key].state == "memory" for f in intermediate)
+
+    while any(f.key in w.tasks for f in futs):
+        await asyncio.sleep(0.001)
+
+    # The scheduler actually gets notified about the removed replica
+    while not all(len(s.tasks[f.key].who_has) == 1 for f in futs):
+        await asyncio.sleep(0.001)
+
+    await final
+    del final, intermediate, futs
+
+    while any(w.tasks for w in workers):
+        await asyncio.sleep(0.001)
+
+
+@gen_cluster(client=True, nthreads=[("", 1)] * 3)
+async def test_who_has_consistent_remove_replica(c, s, *workers):
+
+    a = workers[0]
+    other_workers = {w for w in workers if w != a}
+    f1 = c.submit(inc, 1, key="f1", workers=[w.address for w in other_workers])
+    await wait(f1)
+    for w in other_workers:
+        _acquire_replica(s, w, f1)
+
+    while not len(s.tasks[f1.key].who_has) == len(other_workers):
+        await asyncio.sleep(0)
+
+    f2 = c.submit(inc, f1, workers=[a.address])
+
+    # Wait just until the moment the worker received the task and scheduled the
+    # task to be fetched, then remove the replica from the worker this one is
+    # trying to get the data from. Ensure this is handled gracefully and no
+    # suspicious counters are raised since this is expected behaviour when
+    # removing replicas
+
+    while f1.key not in a.tasks or a.tasks[f1.key].state != "flight":
+        await asyncio.sleep(0)
+
+    coming_from = None
+    for w in other_workers:
+        coming_from = w
+        if w.address == a.tasks[f1.key].coming_from:
+            break
+
+    coming_from.handle_remove_replicas([f1.key], "test")
+
+    await f2
+
+    assert ("missing-dep", f1.key) in a.story(f1.key)
+    assert a.tasks[f1.key].suspicious_count == 0
+    assert s.tasks[f1.key].suspicious == 0

@@ -107,7 +107,7 @@ async def test_create_on_construction(c, s, a, b):
 @gen_cluster(nthreads=[("127.0.0.1", 1)], client=True)
 async def test_normal_task_transitions_called(c, s, w):
     expected_notifications = [
-        {"key": "task", "start": "new", "finish": "waiting"},
+        {"key": "task", "start": "released", "finish": "waiting"},
         {"key": "task", "start": "waiting", "finish": "ready"},
         {"key": "task", "start": "ready", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "memory"},
@@ -127,7 +127,7 @@ async def test_failing_task_transitions_called(c, s, w):
         raise Exception()
 
     expected_notifications = [
-        {"key": "task", "start": "new", "finish": "waiting"},
+        {"key": "task", "start": "released", "finish": "waiting"},
         {"key": "task", "start": "waiting", "finish": "ready"},
         {"key": "task", "start": "ready", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "error"},
@@ -147,7 +147,7 @@ async def test_failing_task_transitions_called(c, s, w):
 )
 async def test_superseding_task_transitions_called(c, s, w):
     expected_notifications = [
-        {"key": "task", "start": "new", "finish": "waiting"},
+        {"key": "task", "start": "released", "finish": "waiting"},
         {"key": "task", "start": "waiting", "finish": "constrained"},
         {"key": "task", "start": "constrained", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "memory"},
@@ -166,11 +166,11 @@ async def test_dependent_tasks(c, s, w):
     dsk = {"dep": 1, "task": (inc, "dep")}
 
     expected_notifications = [
-        {"key": "dep", "start": "new", "finish": "waiting"},
+        {"key": "dep", "start": "released", "finish": "waiting"},
         {"key": "dep", "start": "waiting", "finish": "ready"},
         {"key": "dep", "start": "ready", "finish": "executing"},
         {"key": "dep", "start": "executing", "finish": "memory"},
-        {"key": "task", "start": "new", "finish": "waiting"},
+        {"key": "task", "start": "released", "finish": "waiting"},
         {"key": "task", "start": "waiting", "finish": "ready"},
         {"key": "task", "start": "ready", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "memory"},

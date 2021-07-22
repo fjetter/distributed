@@ -152,7 +152,7 @@ async def test_dont_steal_fast_tasks_compute_time(c, s, *workers):
     xs = c.map(do_nothing, range(10), workers=workers[0].address)
     await wait(xs)
 
-    futures = c.map(do_nothing, range(1000), y=xs)
+    futures = c.map(do_nothing, range(100), y=xs)
 
     await wait(futures)
 

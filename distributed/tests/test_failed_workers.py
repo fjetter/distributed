@@ -407,9 +407,10 @@ class SlowTransmitData:
         return parse_bytes(dask.config.get("distributed.comm.offload")) + 1
 
 
-@pytest.mark.flaky(reruns=10, reruns_delay=5)
 @gen_cluster(client=True)
 async def test_worker_who_has_clears_after_failed_connection(c, s, a, b):
+    """This test is very sensitive to cluster state consistency. Timeouts often
+    indicate subtle deadlocks. Be mindful when marking flaky/repeat/etc."""
     n = await Nanny(s.address, nthreads=2, loop=s.loop)
 
     while len(s.nthreads) < 3:
@@ -546,7 +547,7 @@ class SlowDeserialize:
         import dask
         from dask.utils import parse_bytes
 
-        return parse_bytes(dask.config.get("distributed.comm.offload")) + 1
+        return parse_bytes(dask.config.get("distributed.comm.offload")) + int(1e6)
 
 
 @gen_cluster(client=True)
@@ -599,7 +600,10 @@ async def test_handle_superfluous_data(c, s, a, b):
     # in memory which exposes us to a race condition on B if B also receives the
     # signal to compute that task in the meantime.
     s.handle_missing_data(key=dep_key, errant_worker=a.address)
+
     await red
+
+    assert any("Remove replica request" == msg[0] for msg in b.story("A"))
 
 
 @gen_cluster()
@@ -618,7 +622,9 @@ async def test_forget_data_not_supposed_to_have(s, a, b):
     ts = TaskState("key")
     ts.state = "flight"
     a.tasks["key"] = ts
-    a.transition_flight_memory(ts, value=123)
+    recommendations = {ts: ("memory", 123)}
+    a.transitions(recommendations, stimulus_id="test")
+
     assert a.data
     while a.data:
         await asyncio.sleep(0.001)
