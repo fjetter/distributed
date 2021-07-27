@@ -218,11 +218,12 @@ class Future(WrappedKey):
         If *timeout* seconds are elapsed before returning, a
         ``dask.distributed.TimeoutError`` is raised.
         """
-        if self.client.asynchronous:
-            return self.client.sync(self._result, callback_timeout=timeout)
+        result = self.client.sync(self._result, callback_timeout=timeout)
+
+        if inspect.isawaitable(result):
+            return result
 
         # shorten error traceback
-        result = self.client.sync(self._result, callback_timeout=timeout, raiseit=False)
         if self.status == "error":
             typ, exc, tb = result
             raise exc.with_traceback(tb)
@@ -231,8 +232,11 @@ class Future(WrappedKey):
         else:
             return result
 
-    async def _result(self, raiseit=True):
+    async def _result(self):
         await self._state.wait()
+        raiseit = self.client.asynchronous or getattr(
+            thread_state, "asynchronous", False
+        )
         if self.status == "error":
             exc = clean_exception(self._state.exception, self._state.traceback)
             if raiseit:
@@ -4421,9 +4425,15 @@ class as_completed:
             pass
         if self.with_results:
             try:
-                result = await future._result(raiseit=False)
+                result = await future._result()
             except CancelledError as exc:
                 result = exc
+            except Exception as exc:
+                result = (
+                    None,
+                    exc,
+                    await future._traceback(),
+                )
         with self.lock:
             if future in self.futures:
                 self.futures[future] -= 1
@@ -4492,7 +4502,7 @@ class as_completed:
         if self.with_results:
             future, result = res
             if self.raise_errors and future.status == "error":
-                typ, exc, tb = result
+                _, exc, tb = result
                 raise exc.with_traceback(tb)
         return res
 

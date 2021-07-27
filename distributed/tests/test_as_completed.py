@@ -199,6 +199,7 @@ async def test_as_completed_with_results_async(c, s, a, b):
         async for _ in ac:
             pass
     assert str(exc.value) == "hello!"
+    assert len(exc.traceback) <= 4
 
 
 def test_as_completed_with_results_no_raise(client):

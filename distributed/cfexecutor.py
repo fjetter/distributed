@@ -2,7 +2,6 @@ import concurrent.futures as cf
 import weakref
 
 from tlz import merge
-from tornado import gen
 
 from dask.utils import parse_timedelta
 
@@ -10,33 +9,10 @@ from .metrics import time
 from .utils import TimeoutError, sync
 
 
-@gen.coroutine
-def _cascade_future(future, cf_future):
-    """
-    Coroutine that waits on Dask future, then transmits its outcome to
-    cf_future.
-    """
-    result = yield future._result(raiseit=False)
-    status = future.status
-    if status == "finished":
-        cf_future.set_result(result)
-    elif status == "cancelled":
-        cf_future.cancel()
-        # Necessary for wait() and as_completed() to wake up
-        cf_future.set_running_or_notify_cancel()
-    else:
-        try:
-            typ, exc, tb = result
-            raise exc.with_traceback(tb)
-        except BaseException as exc:
-            cf_future.set_exception(exc)
-
-
-@gen.coroutine
-def _wait_on_futures(futures):
+async def _wait_on_futures(futures):
     for fut in futures:
         try:
-            yield fut
+            await fut
         except Exception:
             pass
 
@@ -73,9 +49,22 @@ class ClientExecutor(cf.Executor):
             if cf_future.cancelled() and future.status != "cancelled":
                 future.cancel()
 
-        cf_future.add_done_callback(cf_callback)
+        def fut_callback(future):
+            status = future.status
+            if status == "finished":
+                cf_future.set_result(future.result())
+            elif status == "cancelled":
+                if cf_future.cancel():
+                    # Necessary for wait() and as_completed() to wake up
+                    cf_future.set_running_or_notify_cancel()
+            else:
+                exc = future.exception()
+                tb = future.traceback()
+                cf_future.set_exception(exc)
+                raise exc.with_traceback(tb)
 
-        self._client.loop.add_callback(_cascade_future, future, cf_future)
+        cf_future.add_done_callback(cf_callback)
+        future.add_done_callback(fut_callback)
         return cf_future
 
     def submit(self, fn, *args, **kwargs):
