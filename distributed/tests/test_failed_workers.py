@@ -603,8 +603,6 @@ async def test_handle_superfluous_data(c, s, a, b):
 
     await red
 
-    assert any("Remove replica request" == msg[0] for msg in b.story("A"))
-
 
 @gen_cluster()
 async def test_forget_data_not_supposed_to_have(s, a, b):

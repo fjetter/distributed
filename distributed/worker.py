@@ -2636,6 +2636,8 @@ class Worker(ServerNode):
             if self.validate:
                 assert not isinstance(key, TaskState)
             ts = self.tasks.get(key, None)
+            if ts is None:
+                return
 
             logger.debug(
                 "Release key %s", {"key": key, "cause": cause, "reason": reason}
