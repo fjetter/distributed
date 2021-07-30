@@ -1,0 +1,13 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.8.10, pytest-6.2.4, py-1.10.0, pluggy-0.13.1 -- /Users/fjetter/mambaforge/envs/dask-distributed/bin/python
+cachedir: .pytest_cache
+rootdir: /Users/fjetter/workspace/distributed, configfile: setup.cfg
+plugins: repeat-0.8.0, xdist-2.3.0, asyncio-0.12.0, rerunfailures-10.1, timeout-1.4.2, forked-1.3.0
+timeout: 120.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 21 items
+run-last-failure: rerun previous 21 failures (skipped 95 files)
+
+distributed/tests/test_client.py::test_open_close_many_workers[Worker-100-5] PASSED [  4%]
+distributed/tests/test_client.py::test_open_close_many_workers[Nanny-10-20] 

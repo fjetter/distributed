@@ -5353,6 +5353,8 @@ class Scheduler(SchedulerState, ServerNode):
 
     def release_worker_data(self, comm=None, keys=None, worker=None):
         parent: SchedulerState = cast(SchedulerState, self)
+        if worker not in parent._workers_dv:
+            return
         ws: WorkerState = parent._workers_dv[worker]
         tasks: set = {parent._tasks[k] for k in keys if k in parent._tasks}
         removed_tasks: set = tasks.intersection(ws._has_what)

@@ -29,6 +29,7 @@ from distributed.utils_test import (
 pytestmark = pytest.mark.ci1
 
 
+@pytest.mark.repeat(100)
 def test_submit_after_failed_worker_sync(loop):
     with cluster() as (s, [a, b]):
         with Client(s["address"], loop=loop) as c:
@@ -527,27 +528,7 @@ async def test_worker_time_to_live(c, s, a, b):
     set(s.workers) == {b.address}
 
 
-class SlowDeserialize:
-    def __init__(self, data, delay=0.1):
-        self.delay = delay
-        self.data = data
-
-    def __getstate__(self):
-        return self.delay
-
-    def __setstate__(self, state):
-        delay = state
-        import time
-
-        time.sleep(delay)
-        return SlowDeserialize(delay)
-
-    def __sizeof__(self) -> int:
-        # Ensure this is offloaded to avoid blocking loop
-        import dask
-        from dask.utils import parse_bytes
-
-        return parse_bytes(dask.config.get("distributed.comm.offload")) + int(1e6)
+from distributed.utils_test import slow_deser
 
 
 @gen_cluster(client=True)
@@ -555,9 +536,6 @@ async def test_handle_superfluous_data(c, s, a, b):
     """
     See https://github.com/dask/distributed/pull/4784#discussion_r649210094
     """
-
-    def slow_deser(x, delay):
-        return SlowDeserialize(x, delay=delay)
 
     futA = c.submit(
         slow_deser, 1, delay=1, workers=[a.address], key="A", allow_other_workers=True
@@ -633,6 +611,7 @@ async def test_forget_data_not_supposed_to_have(s, a, b):
     nthreads=[("127.0.0.1", 1) for _ in range(3)],
     config={"distributed.comm.timeouts.connect": "1s"},
     Worker=Nanny,
+    timeout=1000,
 )
 async def test_failing_worker_with_additional_replicas_on_cluster(c, s, *workers):
     """

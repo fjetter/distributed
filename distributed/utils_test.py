@@ -332,6 +332,36 @@ def slowidentity(*args, **kwargs):
         return args
 
 
+class SlowDeserialize:
+    def __init__(self, data, delay=0.1):
+        self.delay = delay
+        self.data = data
+
+    def __getstate__(self):
+        import time
+
+        time.sleep(self.delay)
+        return (self.data, self.delay)
+
+    def __setstate__(self, state):
+        import time
+
+        self.data, self.delay = state
+        time.sleep(self.delay)
+        return self
+
+    def __sizeof__(self) -> int:
+        # Ensure this is offloaded to avoid blocking loop
+        import dask
+        from dask.utils import parse_bytes
+
+        return parse_bytes(dask.config.get("distributed.comm.offload")) + int(1e6)
+
+
+def slow_deser(x, delay):
+    return SlowDeserialize(x, delay=delay)
+
+
 def run_for(duration, timer=time):
     """
     Burn CPU for *duration* seconds.

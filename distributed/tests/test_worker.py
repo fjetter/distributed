@@ -2135,7 +2135,7 @@ async def test_worker_state_error_release_error_last(c, s, a, b):
             await asyncio.sleep(0.01)
 
 
-@gen_cluster(client=True)
+@gen_cluster(client=True, timeout=3000)
 async def test_worker_state_error_release_error_first(c, s, a, b):
     """
     Create a chain of tasks and err one of them. Then release tasks in a certain
@@ -2707,7 +2707,7 @@ async def test_abort_execution_release(c, s, w):
     del fut2
 
 
-@gen_cluster(client=True, nthreads=[("", 1)], Worker=Nanny)
+@gen_cluster(client=True, nthreads=[("", 1)], Worker=Nanny, timeout=3000)
 async def test_abort_execution_reschedule(c, s, w):
     fut = c.submit(slowinc, 1, delay=1)
 
@@ -2766,7 +2766,7 @@ async def test_abort_execution_add_as_dependency(c, s, w):
     await fut
 
 
-@gen_cluster(client=True, nthreads=[("", 1)] * 2, Worker=Nanny, timeout=3000)
+@gen_cluster(client=True, nthreads=[("", 1)] * 2, Worker=Nanny)
 async def test_abort_execution_to_fetch(c, s, a, b):
     fut = c.submit(slowinc, 1, delay=2, key="f1", workers=[a.worker_address])
 
@@ -2799,3 +2799,52 @@ async def test_abort_execution_to_fetch(c, s, a, b):
     # simply re-use the currently computing result.
     fut = c.submit(slowinc, fut, delay=1, workers=[a.worker_address], key="f2")
     await fut
+
+
+@gen_cluster(client=True, nthreads=[("", 1)] * 2)
+async def test_worker_find_missing(c, s, *workers):
+
+    fut = c.submit(slowinc, 1, delay=0.5, workers=[workers[0].address])
+    await wait(fut)
+    # We do not want to use proper API since the API usually ensures that the cluster is informed properly. We want to
+    del workers[0].data[fut.key]
+    del workers[0].tasks[fut.key]
+
+    # Actually no worker has the data, the scheduler is supposed to reschedule
+    await c.submit(inc, fut, workers=[workers[1].address])
+
+
+from distributed.utils_test import slow_deser
+
+
+@gen_cluster(client=True, nthreads=[("", 1)] * 2, Worker=Nanny)
+async def test_worker_stream_died_during_comm(c, s, *workers):
+
+    fut = c.submit(slow_deser, 1, delay=2, workers=[workers[0].worker_address])
+    await wait(fut)
+
+    def _id(val):
+        return val
+
+    # Actually no worker has the data, the scheduler is supposed to reschedule
+    res = c.submit(_id, fut, workers=[workers[1].worker_address])
+
+    dep_key = fut.key
+    remote_address = workers[0].worker_address
+
+    async def observe(dask_worker):
+        while (
+            dep_key not in dask_worker.tasks
+            or not dask_worker.tasks[dep_key].state == "flight"
+            or not dask_worker.tasks[dep_key] in dask_worker._in_flight_tasks
+        ):
+            await asyncio.sleep(0.001)
+        print("closing comms")
+        for collection in [dask_worker.rpc.occupied, dask_worker.rpc.available]:
+            while collection:
+                addr, comms = collection.popitem()
+                for comm in comms:
+                    comm.abort()
+
+    await c.run(observe, workers=[workers[1].worker_address])
+    await res
