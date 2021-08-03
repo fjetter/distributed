@@ -332,22 +332,23 @@ def slowidentity(*args, **kwargs):
         return args
 
 
-class SlowDeserialize:
-    def __init__(self, data, delay=0.1):
-        self.delay = delay
+class SlowSerialize:
+    def __init__(self, data, delay_deserialize=0, delay_serialize=0):
+        self.delay_deserialize = delay_deserialize
+        self.delay_serialize = delay_serialize
         self.data = data
 
     def __getstate__(self):
         import time
 
-        time.sleep(self.delay)
-        return (self.data, self.delay)
+        time.sleep(self.delay_serialize)
+        return (self.data, self.delay_deserialize, self.delay_serialize)
 
     def __setstate__(self, state):
         import time
 
-        self.data, self.delay = state
-        time.sleep(self.delay)
+        self.data, self.delay_deserialize, self.delay_serialize = state
+        time.sleep(self.delay_deserialize)
         return self
 
     def __sizeof__(self) -> int:
@@ -358,8 +359,12 @@ class SlowDeserialize:
         return parse_bytes(dask.config.get("distributed.comm.offload")) + int(1e6)
 
 
+def slow_serialize(x, delay):
+    return SlowSerialize(x, delay_serialize=delay)
+
+
 def slow_deser(x, delay):
-    return SlowDeserialize(x, delay=delay)
+    return SlowSerialize(x, delay_deserialize=delay)
 
 
 def run_for(duration, timer=time):

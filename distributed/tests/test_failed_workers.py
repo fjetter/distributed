@@ -29,7 +29,6 @@ from distributed.utils_test import (
 pytestmark = pytest.mark.ci1
 
 
-@pytest.mark.repeat(100)
 def test_submit_after_failed_worker_sync(loop):
     with cluster() as (s, [a, b]):
         with Client(s["address"], loop=loop) as c:
@@ -408,7 +407,7 @@ class SlowTransmitData:
         return parse_bytes(dask.config.get("distributed.comm.offload")) + 1
 
 
-@gen_cluster(client=True)
+@gen_cluster(client=True, timeout=345678)
 async def test_worker_who_has_clears_after_failed_connection(c, s, a, b):
     """This test is very sensitive to cluster state consistency. Timeouts often
     indicate subtle deadlocks. Be mindful when marking flaky/repeat/etc."""
