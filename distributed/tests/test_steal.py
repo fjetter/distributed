@@ -678,24 +678,30 @@ async def test_steal_twice(c, s, a, b):
 async def test_dont_steal_already_released(c, s, a, b):
     future = c.submit(slowinc, 1, delay=0.05, workers=a.address)
     key = future.key
-    await asyncio.sleep(0.05)
-    assert key in a.tasks
+    while key not in a.tasks:
+        await asyncio.sleep(0.05)
+
     del future
-    await asyncio.sleep(0.05)
+
     # In case the system is slow (e.g. network) ensure that nothing bad happens
     # if the key was already released
-    assert key not in a.tasks
+    while key in a.tasks and a.tasks[key].state != "released":
+        await asyncio.sleep(0.05)
+
     a.steal_request(key)
-    assert a.batched_stream.buffer == [
-        {"op": "steal-response", "key": key, "state": None}
-    ]
+    assert len(a.batched_stream.buffer) == 1
+    msg = a.batched_stream.buffer[0]
+    assert msg["op"] == "steal-response"
+    assert msg["key"] == key
+    assert msg["state"] in [None, "released"]
+
     with captured_logger(
         logging.getLogger("distributed.stealing"), level=logging.DEBUG
     ) as stealing_logs:
-        await asyncio.sleep(0.05)
-
-    logs = stealing_logs.getvalue()
-    assert f"Key released between request and confirm: {key}" in logs
+        logs = stealing_logs.getvalue()
+        while f"Key released between request and confirm: {key}" not in logs:
+            await asyncio.sleep(0.05)
+            logs = stealing_logs.getvalue()
 
 
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 2)

@@ -1986,24 +1986,23 @@ class Worker(ServerNode):
         return {}, []
 
     def transition_cancelled_forgotten(self, ts, *, stimulus_id):
+        ts._next = "forgotten"
         if not ts.done:
-            ts._next = "forgotten"
             return {}, []
-        recs = self.release_key(ts.key, reason=stimulus_id)
-        recs[ts] = "forgotten"
-        return recs, []
+        return {ts: "released"}, []
 
     def transition_cancelled_released(self, ts, *, stimulus_id):
         if not ts.done:
             ts._next = "released"
             return {}, []
+        next_state = ts._next
         self._executing.discard(ts)
         self._in_flight_tasks.discard(ts)
 
         for resource, quantity in ts.resource_restrictions.items():
             self.available_resources[resource] += quantity
         recommendations = self.release_key(ts.key, reason=stimulus_id)
-
+        recommendations[ts] = next_state or "released"
         return recommendations, []
 
     def transition_executing_released(self, ts, *, stimulus_id):
@@ -2843,9 +2842,6 @@ class Worker(ServerNode):
             if key in self.threads:
                 del self.threads[key]
 
-            if ts.state == "executing":
-                self._executing.discard(ts)
-
             if ts.resource_restrictions is not None:
                 if ts.state == "executing":
                     for resource, quantity in ts.resource_restrictions.items():
@@ -2858,8 +2854,11 @@ class Worker(ServerNode):
 
             ts.waiting_for_data.clear()
             ts.nbytes = None
-            ts._next = None
+            ts._next = None  # TODO: Is this correct to reset here?
             ts.done = False
+
+            self._executing.discard(ts)
+            self._in_flight_tasks.discard(ts)
 
             if report:
                 # Inform the scheduler of keys which will have gone missing

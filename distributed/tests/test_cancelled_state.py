@@ -10,9 +10,9 @@ from distributed.utils_test import gen_cluster, inc, slowinc
 pytestmark = pytest.mark.ci1
 
 
-@gen_cluster(client=True, nthreads=[("", 1)], Worker=Nanny, timeout=567890)
+@gen_cluster(client=True, nthreads=[("", 1)], Worker=Nanny)
 async def test_abort_execution_release(c, s, w):
-    fut = c.submit(slowinc, 1, delay=0.5)
+    fut = c.submit(slowinc, 1, delay=0.5, key="f1")
 
     async def wait_for_exec(dask_worker):
         while (
@@ -24,7 +24,7 @@ async def test_abort_execution_release(c, s, w):
     await c.run(wait_for_exec)
 
     fut.release()
-    fut2 = c.submit(inc, 1)
+    fut2 = c.submit(inc, 1, key="f2")
 
     async def observe(dask_worker):
         cancelled = False
