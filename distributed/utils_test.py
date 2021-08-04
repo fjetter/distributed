@@ -11,7 +11,6 @@ import logging.config
 import os
 import queue
 import re
-import shutil
 import signal
 import socket
 import subprocess
@@ -22,7 +21,6 @@ import uuid
 import warnings
 import weakref
 from contextlib import contextmanager, nullcontext, suppress
-from glob import glob
 from time import sleep
 
 from distributed.scheduler import Scheduler
@@ -618,117 +616,116 @@ def cluster(
     enable_proctitle_on_children()
 
     with clean(timeout=active_rpc_timeout, threads=False) as loop:
-        if nanny:
-            _run_worker = run_nanny
-        else:
-            _run_worker = run_worker
+        with tempfile.TemporaryDirectory() as tmpdir:
+            if nanny:
+                _run_worker = run_nanny
+            else:
+                _run_worker = run_worker
 
-        # The scheduler queue will receive the scheduler's address
-        scheduler_q = mp_context.Queue()
+            # The scheduler queue will receive the scheduler's address
+            scheduler_q = mp_context.Queue()
 
-        # Launch scheduler
-        scheduler = mp_context.Process(
-            name="Dask cluster test: Scheduler",
-            target=run_scheduler,
-            args=(scheduler_q, nworkers + 1, config),
-            kwargs=scheduler_kwargs,
-        )
-        ws.add(scheduler)
-        scheduler.daemon = True
-        scheduler.start()
-
-        # Launch workers
-        workers = []
-        for i in range(nworkers):
-            q = mp_context.Queue()
-            fn = "_test_worker-%s" % uuid.uuid4()
-            kwargs = merge(
-                {
-                    "nthreads": 1,
-                    "local_directory": fn,
-                    "memory_limit": system.MEMORY_LIMIT,
-                },
-                worker_kwargs,
+            # Launch scheduler
+            scheduler = mp_context.Process(
+                name="Dask cluster test: Scheduler",
+                target=run_scheduler,
+                args=(scheduler_q, nworkers + 1, config),
+                kwargs=scheduler_kwargs,
             )
-            proc = mp_context.Process(
-                name="Dask cluster test: Worker",
-                target=_run_worker,
-                args=(q, scheduler_q, config),
-                kwargs=kwargs,
-            )
-            ws.add(proc)
-            workers.append({"proc": proc, "queue": q, "dir": fn})
+            ws.add(scheduler)
+            scheduler.daemon = True
+            scheduler.start()
 
-        for worker in workers:
-            worker["proc"].start()
-        try:
+            # Launch workers
+            workers = []
+            for i in range(nworkers):
+                local_dir = os.path.join(tmpdir, f"_test_worker-{uuid.uuid4()}")
+                q = mp_context.Queue()
+                kwargs = merge(
+                    {
+                        "nthreads": 1,
+                        "local_directory": local_dir,
+                        "memory_limit": system.MEMORY_LIMIT,
+                    },
+                    worker_kwargs,
+                )
+                proc = mp_context.Process(
+                    name="Dask cluster test: Worker",
+                    target=_run_worker,
+                    args=(q, scheduler_q, config),
+                    kwargs=kwargs,
+                )
+                ws.add(proc)
+                workers.append({"proc": proc, "queue": q, "dir": local_dir})
+
             for worker in workers:
-                worker["address"] = worker["queue"].get(timeout=5)
-        except queue.Empty:
-            raise pytest.xfail.Exception("Worker failed to start in test")
-
-        saddr = scheduler_q.get()
-
-        start = time()
-        try:
+                worker["proc"].start()
             try:
-                security = scheduler_kwargs["security"]
-                rpc_kwargs = {"connection_args": security.get_connection_args("client")}
-            except KeyError:
-                rpc_kwargs = {}
+                for worker in workers:
+                    worker["address"] = worker["queue"].get(timeout=5)
+            except queue.Empty:
+                raise pytest.xfail.Exception("Worker failed to start in test")
 
-            with rpc(saddr, **rpc_kwargs) as s:
-                while True:
-                    nthreads = loop.run_sync(s.ncores)
-                    if len(nthreads) == nworkers:
-                        break
-                    if time() - start > 5:
-                        raise Exception("Timeout on cluster creation")
+            saddr = scheduler_q.get()
 
-            # avoid sending processes down to function
-            yield {"address": saddr}, [
-                {"address": w["address"], "proc": weakref.ref(w["proc"])}
-                for w in workers
-            ]
-        finally:
-            logger.debug("Closing out test cluster")
+            start = time()
+            try:
+                try:
+                    security = scheduler_kwargs["security"]
+                    rpc_kwargs = {
+                        "connection_args": security.get_connection_args("client")
+                    }
+                except KeyError:
+                    rpc_kwargs = {}
 
-            loop.run_sync(
-                lambda: disconnect_all(
-                    [w["address"] for w in workers],
-                    timeout=disconnect_timeout,
-                    rpc_kwargs=rpc_kwargs,
+                with rpc(saddr, **rpc_kwargs) as s:
+                    while True:
+                        nthreads = loop.run_sync(s.ncores)
+                        if len(nthreads) == nworkers:
+                            break
+                        if time() - start > 5:
+                            raise Exception("Timeout on cluster creation")
+
+                # avoid sending processes down to function
+                yield {"address": saddr}, [
+                    {"address": w["address"], "proc": weakref.ref(w["proc"])}
+                    for w in workers
+                ]
+            finally:
+                logger.debug("Closing out test cluster")
+
+                loop.run_sync(
+                    lambda: disconnect_all(
+                        [w["address"] for w in workers],
+                        timeout=disconnect_timeout,
+                        rpc_kwargs=rpc_kwargs,
+                    )
                 )
-            )
-            loop.run_sync(
-                lambda: disconnect(
-                    saddr, timeout=disconnect_timeout, rpc_kwargs=rpc_kwargs
+                loop.run_sync(
+                    lambda: disconnect(
+                        saddr, timeout=disconnect_timeout, rpc_kwargs=rpc_kwargs
+                    )
                 )
-            )
 
-            scheduler.terminate()
-            scheduler_q.close()
-            scheduler_q._reader.close()
-            scheduler_q._writer.close()
+                scheduler.terminate()
+                scheduler_q.close()
+                scheduler_q._reader.close()
+                scheduler_q._writer.close()
 
-            for w in workers:
-                w["proc"].terminate()
-                w["queue"].close()
-                w["queue"]._reader.close()
-                w["queue"]._writer.close()
+                for w in workers:
+                    w["proc"].terminate()
+                    w["queue"].close()
+                    w["queue"]._reader.close()
+                    w["queue"]._writer.close()
 
-            scheduler.join(2)
-            del scheduler
-            for proc in [w["proc"] for w in workers]:
-                proc.join(timeout=30)
+                scheduler.join(2)
+                del scheduler
+                for proc in [w["proc"] for w in workers]:
+                    proc.join(timeout=30)
 
-            with suppress(UnboundLocalError):
-                del worker, w, proc
-            del workers[:]
-
-            for fn in glob("_test_worker-*"):
-                with suppress(OSError):
-                    shutil.rmtree(fn)
+                with suppress(UnboundLocalError):
+                    del worker, w, proc
+                del workers[:]
 
         try:
             client = default_client()
