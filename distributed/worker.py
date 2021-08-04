@@ -2203,9 +2203,9 @@ class Worker(ServerNode):
                 v_state = v
                 if isinstance(v, tuple):
                     v_state, *v_args = finish
-                func = self._transitions_table[ts.state, v_state]
-
-                b: tuple = func(ts, *v_args, stimulus_id=stimulus_id)
+                b: tuple = self._transition(
+                    ts, v_state, *v_args, stimulus_id=stimulus_id
+                )
                 b_recs, b_smsgs = b
                 recommendations.update(b_recs)
                 scheduler_msgs.extend(b_smsgs)
@@ -2818,6 +2818,8 @@ class Worker(ServerNode):
             if self.validate:
                 assert not isinstance(key, TaskState)
             ts = self.tasks[key]
+            # needed for legacy notification support
+            state_before = ts.state
             ts.state = "released"
 
             logger.debug(
@@ -2874,7 +2876,9 @@ class Worker(ServerNode):
                         "worker": self.address,
                     }
                 self.batched_stream.send(msg)
-            self._notify_plugins("release_key", key, ts.state, cause, reason, report)
+            self._notify_plugins(
+                "release_key", key, state_before, cause, reason, report
+            )
         except CommClosedError:
             # Batched stream send might raise if it was already closed
             pass
@@ -3455,6 +3459,15 @@ class Worker(ServerNode):
     def _notify_plugins(self, method_name, *args, **kwargs):
         for name, plugin in self.plugins.items():
             if hasattr(plugin, method_name):
+                if method_name == "release_key":
+                    warnings.warn(
+                        """
+The `WorkerPlugin.release_key` hook is depreacted and will be removed in a future version.
+A similar event can now be caught by filtering for a `finish=='released'` event in the `WorkerPlugin.transition` hook.
+""",
+                        DeprecationWarning,
+                    )
+
                 try:
                     getattr(plugin, method_name)(*args, **kwargs)
                 except Exception:

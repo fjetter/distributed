@@ -34,9 +34,6 @@ class MyPlugin(WorkerPlugin):
             {"key": key, "start": start, "finish": finish}
         )
 
-    def release_key(self, key, state, cause, reason, report):
-        self.observed_notifications.append({"key": key, "state": state})
-
 
 @gen_cluster(client=True, nthreads=[])
 async def test_create_with_client(c, s):
@@ -111,7 +108,8 @@ async def test_normal_task_transitions_called(c, s, w):
         {"key": "task", "start": "waiting", "finish": "ready"},
         {"key": "task", "start": "ready", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "memory"},
-        {"key": "task", "state": "memory"},
+        {"key": "task", "start": "memory", "finish": "released"},
+        {"key": "task", "start": "released", "finish": "forgotten"},
     ]
 
     plugin = MyPlugin(1, expected_notifications=expected_notifications)
@@ -131,7 +129,8 @@ async def test_failing_task_transitions_called(c, s, w):
         {"key": "task", "start": "waiting", "finish": "ready"},
         {"key": "task", "start": "ready", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "error"},
-        {"key": "task", "state": "error"},
+        {"key": "task", "start": "error", "finish": "released"},
+        {"key": "task", "start": "released", "finish": "forgotten"},
     ]
 
     plugin = MyPlugin(1, expected_notifications=expected_notifications)
@@ -151,7 +150,8 @@ async def test_superseding_task_transitions_called(c, s, w):
         {"key": "task", "start": "waiting", "finish": "constrained"},
         {"key": "task", "start": "constrained", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "memory"},
-        {"key": "task", "state": "memory"},
+        {"key": "task", "start": "memory", "finish": "released"},
+        {"key": "task", "start": "released", "finish": "forgotten"},
     ]
 
     plugin = MyPlugin(1, expected_notifications=expected_notifications)
@@ -174,8 +174,10 @@ async def test_dependent_tasks(c, s, w):
         {"key": "task", "start": "waiting", "finish": "ready"},
         {"key": "task", "start": "ready", "finish": "executing"},
         {"key": "task", "start": "executing", "finish": "memory"},
-        {"key": "dep", "state": "memory"},
-        {"key": "task", "state": "memory"},
+        {"key": "dep", "start": "memory", "finish": "released"},
+        {"key": "dep", "start": "released", "finish": "forgotten"},
+        {"key": "task", "start": "memory", "finish": "released"},
+        {"key": "task", "start": "released", "finish": "forgotten"},
     ]
 
     plugin = MyPlugin(1, expected_notifications=expected_notifications)
@@ -218,3 +220,50 @@ async def test_default_name(c, s, w):
     await c.register_worker_plugin(MyCustomPlugin())
     assert len(w.plugins) == 1
     assert next(iter(w.plugins)).startswith("MyCustomPlugin-")
+
+
+def test_release_key_deprecated():
+    class ReleaseKeyDeprecated(WorkerPlugin):
+        def __init__(self):
+            self._called = False
+
+        def release_key(self, key, state, cause, reason, report):
+            # Ensure that the handler still works
+            self._called = True
+            assert state == "memory"
+            assert key == "task"
+
+        def teardown(self, worker):
+            assert self._called
+            return super().teardown(worker)
+
+    @gen_cluster(client=True, nthreads=[("", 1)])
+    async def test(c, s, a):
+
+        await c.register_worker_plugin(ReleaseKeyDeprecated())
+        fut = await c.submit(inc, 1, key="task")
+        assert fut == 2
+
+    with pytest.deprecated_call(
+        match="The `WorkerPlugin.release_key` hook is depreacted"
+    ):
+        test()
+
+
+def test_assert_no_warning_no_overload():
+    """Assert we do not receive a deprecation warning if we do not overload any
+    methods
+    """
+
+    class Dummy(WorkerPlugin):
+        pass
+
+    @gen_cluster(client=True, nthreads=[("", 1)])
+    async def test(c, s, a):
+
+        await c.register_worker_plugin(Dummy())
+        fut = await c.submit(inc, 1, key="task")
+        assert fut == 2
+
+    with pytest.warns(None):
+        test()
