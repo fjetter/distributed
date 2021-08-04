@@ -1987,11 +1987,15 @@ class Worker(ServerNode):
 
     def transition_cancelled_forgotten(self, ts, *, stimulus_id):
         if not ts.done:
+            ts._next = "forgotten"
             return {}, []
-        return {ts: "forgotten"}, []
+        recs = self.release_key(ts.key, reason=stimulus_id)
+        recs[ts] = "forgotten"
+        return recs, []
 
     def transition_cancelled_released(self, ts, *, stimulus_id):
         if not ts.done:
+            ts._next = "released"
             return {}, []
         self._executing.discard(ts)
         self._in_flight_tasks.discard(ts)
@@ -2110,7 +2114,7 @@ class Worker(ServerNode):
         return {}, []
 
     def transition_cancelled_memory(self, ts, value, *, stimulus_id):
-        return {ts: "released"}, []
+        return {ts: ts._next}, []
 
     def transition_generic_released(self, ts, *, stimulus_id):
         recs = self.release_key(ts.key, reason=stimulus_id)
@@ -2801,7 +2805,7 @@ class Worker(ServerNode):
             # If task is marked as "constrained" we haven't yet assigned it an
             # `available_resources` to run on, that happens in
             # `transition_constrained_executing`
-            self.transition(ts, "released", stimulus_id=f"steal-request-{time()}")
+            self.transition(ts, "forgotten", stimulus_id=f"steal-request-{time()}")
 
     def release_key(
         self,

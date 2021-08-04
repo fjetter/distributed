@@ -362,10 +362,8 @@ async def test_steal_resource_restrictions(c, s, a):
 
     b = await Worker(s.address, loop=s.loop, nthreads=1, resources={"A": 4})
 
-    start = time()
     while not b.tasks or len(a.tasks) == 101:
         await asyncio.sleep(0.01)
-        assert time() < start + 3
 
     assert len(b.tasks) > 0
     assert len(a.tasks) < 101
