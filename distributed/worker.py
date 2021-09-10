@@ -2105,7 +2105,10 @@ class Worker(ServerNode):
             assert not any(d.state != "forgotten" for d in ts.dependents)
         for dep in ts.dependencies:
             dep.dependents.discard(ts)
-            if dep.state == "released" and not dep.dependents:
+            if (
+                dep.state in {"released", "missing", "flight", "fetch"}
+                and not dep.dependents
+            ):
                 recommendations[dep] = "forgotten"
 
         # Mark state as forgotten in case it is still referenced
