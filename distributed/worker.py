@@ -1785,7 +1785,7 @@ class Worker(ServerNode):
 
     def transition_missing_released(self, ts, *, stimulus_id):
         self._missing_dep_flight.discard(ts)
-        recommendations = self.release_key(ts.key, reason="missing->released")
+        recommendations = self.release_key(ts.key, reason=stimulus_id)
         assert ts.key in self.tasks
         return recommendations, []
 
@@ -2635,14 +2635,18 @@ class Worker(ServerNode):
                     logger.debug(
                         "No new workers found for %s", self._missing_dep_flight
                     )
-                    recommendations = {
-                        dep: "released"
-                        for dep in self._missing_dep_flight
-                        if dep.state == "missing"
-                    }
-                    self.transitions(
-                        recommendations=recommendations, stimulus_id=stimulus_id
-                    )
+                    # recommendations = {
+                    #     dep: "forgotten"
+                    #     for dep in self._missing_dep_flight
+                    #     if dep.state == "missing"
+                    #     and (
+                    #         not dep.dependents
+                    #         or all(d.state == "released" for d in dep.dependents)
+                    #     )
+                    # }
+                    # self.transitions(
+                    #     recommendations=recommendations, stimulus_id=stimulus_id
+                    # )
 
             finally:
                 # This is quite arbitrary but the heartbeat has scaling implemented
