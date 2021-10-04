@@ -2514,6 +2514,8 @@ class Worker(ServerNode):
                                 cause = dependent
                                 found_dependent_for_cause = True
                                 break
+                if not to_gather_keys:
+                    return
                 # Keep namespace clean since this func is long and has many
                 # dep*, *ts* variables
 
