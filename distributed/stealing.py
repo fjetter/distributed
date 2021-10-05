@@ -289,10 +289,43 @@ class WorkStealing(SchedulerPlugin):
             return ws.occupancy + self.in_flight_occupancy[ws]
 
         def maybe_move_task(level, ts, sat, idl, duration, cost_multiplier):
+            """Decide if we want to move a task or not based on the workers
+            occupancies, the estimated transfer cost and the duration
+            """
             occ_idl = combined_occupancy(idl)
             occ_sat = combined_occupancy(sat)
 
-            if occ_idl + cost_multiplier * duration <= occ_sat - duration / 2:
+            # Primary goal is to rebalance work s.t. occupancies are uniformly
+            # distributed, i.e. diff of occupancy after should be smaller than
+            # before.
+
+            # TODO: This likely needs to be tuned. This only enacts stealing if
+            # we reduce the diff between occupancies by at least 1 - H
+            H = 0.95
+            # TODO: The current balance tests do increase overall occupancy
+            # quite a lot. If we readjust this we'll need to rewrite some tests.
+            COST = 2
+            # If saturated is GAP times more occupied than idle we'll not
+            # investigate diff but simply open the gates
+            GAP = 5
+
+            # Saturated new should also include a negative term accounting for
+            # the dependencies already on that worker. By not accounting this we
+            # assume all dependencies are already on this worker since this is
+            # the most conservative assumption we can make. Calculating this is
+            # likely too expensive. For the same reason we anticipate the thief
+            # to be required to fetch all dependencies and have the full cost
+            # transfer_cost ~ duration * cost_multiplier
+
+            occ_sat_new = occ_sat - duration
+            occ_idle_new = occ_idl + duration + duration * cost_multiplier
+            # H : hysteresis factor such that we only steal if it actually makes a difference
+            reduces_diff = abs(occ_sat_new - occ_idle_new) < (occ_sat - occ_idl) * H
+            large_gap = occ_sat > GAP * occ_idl
+            # If the total cost is increased by a too large factor, it is likely
+            # not worth it.
+            too_costly = (occ_sat_new + occ_idle_new) / (occ_sat + occ_idl) >= COST
+            if (reduces_diff or large_gap) and not too_costly:
                 self.move_task_request(ts, sat, idl)
                 log.append(
                     (

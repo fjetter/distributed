@@ -8,7 +8,7 @@ from operator import mul
 from time import sleep
 
 import pytest
-from tlz import concat, sliding_window
+from tlz import sliding_window
 
 import dask
 
@@ -230,8 +230,8 @@ async def test_work_steal_no_kwargs(c, s, a, b):
 
     await wait(futures)
 
-    assert 20 < len(a.data) < 80
-    assert 20 < len(b.data) < 80
+    assert 0 < len(a.data) < 100
+    assert 0 < len(b.data) < 100
 
     total = c.submit(sum, futures)
     result = await total
@@ -490,7 +490,6 @@ async def assert_balanced(inp, expected, c, s, *workers):
     steal._pc.stop()
 
     counter = itertools.count()
-    tasks = list(concat(inp))
     data_seq = itertools.count()
 
     futures = []
@@ -543,7 +542,8 @@ async def assert_balanced(inp, expected, c, s, *workers):
 
         if result2 == expected2:
             return
-    raise Exception(f"Expected: {expected2}; got: {result2}")
+
+    assert result2 == expected2
 
 
 @pytest.mark.parametrize(
@@ -566,7 +566,7 @@ async def assert_balanced(inp, expected, c, s, *workers):
         ),
         (
             [[4, 2, 2, 2, 2, 1, 1], [4, 2, 1, 1], [], [], []],
-            [[4, 2, 2, 2, 2], [4, 2, 1], [1], [1], [1]],
+            [[4, 2, 2, 2], [4, 2, 1], [2, 1], [1], [1]],
         ),
         pytest.param(
             [[1, 1, 1, 1, 1, 1, 1], [1, 1], [1, 1], [1, 1], []],
@@ -672,7 +672,7 @@ async def test_steal_twice(c, s, a, b):
             "Too many workers without keys (%d out of %d)"
             % (len(empty_workers), len(has_what))
         )
-    assert max(map(len, has_what.values())) < 30
+    assert max(map(len, has_what.values())) < 60
 
     assert a.in_flight_tasks == 0
     assert b.in_flight_tasks == 0
