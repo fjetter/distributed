@@ -110,24 +110,6 @@ async def test_worksteal_many_thieves(c, s, *workers):
     assert sum(map(len, s.has_what.values())) < 150
 
 
-@pytest.mark.flaky(reruns=10, reruns_delay=5, reason="GH#3574")
-@gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 2)
-async def test_dont_steal_unknown_functions(c, s, a, b):
-    futures = c.map(inc, range(100), workers=a.address, allow_other_workers=True)
-    await wait(futures)
-    assert len(a.data) >= 95, [len(a.data), len(b.data)]
-
-
-@gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 2)
-async def test_eventually_steal_unknown_functions(c, s, a, b):
-    futures = c.map(
-        slowinc, range(10), delay=0.1, workers=a.address, allow_other_workers=True
-    )
-    await wait(futures)
-    assert len(a.data) >= 3, [len(a.data), len(b.data)]
-    assert len(b.data) >= 3, [len(a.data), len(b.data)]
-
-
 @pytest.mark.skip(reason="")
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 3)
 async def test_steal_related_tasks(e, s, a, b, c):
