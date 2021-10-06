@@ -2758,7 +2758,6 @@ class SchedulerState:
             for tts in s:
                 if tts._processing_on:
                     self.set_duration_estimate(tts, tts._processing_on)
-                    print("Learned task; Put key in stealable")
                     steal = self.extensions.get("stealing")
                     if steal:
                         steal.put_key_in_stealable(tts)
@@ -7550,34 +7549,25 @@ class Scheduler(SchedulerState, ServerNode):
             if self.status == Status.closed:
                 return
             last = time()
-            print(
-                f"{last} Start reevaluate for {worker_index} / {len(list(parent._workers.values()))}"
-            )
             next_time = timedelta(seconds=0.1)
 
             if self.proc.cpu_percent() < 50:
-                print(f"{last} passed CPU threshold")
                 workers: list = list(parent._workers.values())
                 nworkers: Py_ssize_t = len(workers)
                 i: Py_ssize_t
                 for i in range(nworkers):
-                    print(f"{last} Loop {i} / {nworkers}")
                     ws: WorkerState = workers[worker_index % nworkers]
                     worker_index += 1
                     try:
                         if ws is None or not ws._processing:
-                            print(f"{last} {i} skip {ws or ws._processing} ")
                             continue
-                        print(f"{last} {i} reevaluate")
                         _reevaluate_occupancy_worker(parent, ws)
                     finally:
                         del ws  # lose ref
 
                     duration = time() - last
                     if duration > 0.005:  # 5ms since last release
-                        print(f"{last} too long duration with {duration}")
                         next_time = timedelta(seconds=duration * 5)  # 25ms gap
-                        print(f"{last} next time {next_time}")
                         break
 
             self.loop.add_timeout(
