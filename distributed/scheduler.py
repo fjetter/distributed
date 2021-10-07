@@ -2753,7 +2753,7 @@ class SchedulerState:
                         action=startstop["action"],
                     )
 
-            s: set = self._unknown_durations.pop(ts._prefix._name, {})
+            s: set = self._unknown_durations.pop(ts._prefix._name, set())
             tts: TaskState
             for tts in s:
                 if tts._processing_on:
