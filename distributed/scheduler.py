@@ -866,7 +866,7 @@ class TaskPrefix:
     """
 
     _name: str
-    _all_durations: dict
+    _all_durations: object
     _duration_average: double
     _suspicious: Py_ssize_t
     _groups: list
@@ -1024,7 +1024,7 @@ class TaskGroup:
     _types: set
     _start: double
     _stop: double
-    _all_durations: dict
+    _all_durations: object
     _last_worker: WorkerState
     _last_worker_tasks_left: Py_ssize_t
 
