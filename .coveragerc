@@ -3,17 +3,22 @@ source =
     distributed
 omit =
     distributed/tests/test*
-    distributed/hdfs.py
-    distributed/cluster.py
     distributed/*/tests/test*
-    distributed/compatibility.py
-    distributed/cli/utils.py
-    distributed/utils_test.py
-    distributed/deploy/ssh.py
-    distributed/_ipython_utils.py
+    distributed/pytest_resourceleaks.py
+    distributed/_version.py
+    distributed/asyncio.py  # FIXME: This module should be removed
 
 [report]
 show_missing = True
+exclude_lines =
+    pragma: no cover
+    if self.debug:
+    if settings.DEBUG
+    raise AssertionError
+    raise NotImplementedError
+    if 0:
+    if __name__ == .__main__.:
+    if LOG_PDB:
 
 [html]
 directory = coverage_html_report
