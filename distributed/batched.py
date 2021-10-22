@@ -4,7 +4,6 @@ from collections import deque
 from tornado import gen, locks
 from tornado.ioloop import IOLoop
 
-import dask
 from dask.utils import parse_timedelta
 
 from .core import CommClosedError
@@ -50,9 +49,7 @@ class BatchedSend:
         self.batch_count = 0
         self.byte_count = 0
         self.next_deadline = None
-        self.recent_message_log = deque(
-            maxlen=dask.config.get("distributed.comm.recent-messages-log-length")
-        )
+        self.recent_message_log = deque(maxlen=1_000_000)
         self.serializers = serializers
         self._consecutive_failures = 0
 
