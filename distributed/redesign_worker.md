@@ -177,12 +177,16 @@ class Worker2:
 # The functions/coros should not communicate over a queue since this would render mocking/faking harder since the interface is not that clean.
 class WorkerNoLoop:
 
+    def log_event(self, event):
+        pass
+
     def _handle_event(self, event):
         decisions = self.state.stimulus(event)
         for dec in decisions:
             schedule_callback(dec)
 
     def handle_free_keys(self, keys):
+        self.log_event(...)
         events = self.state.free_keys(keys)
 
         # or
@@ -192,6 +196,31 @@ class WorkerNoLoop:
         for event in events:
             self.schedule_callback(event)
 
+        (f1.key, "compute-task"),
+        (
+            f1.key,
+            "released",
+            "waiting",
+            "waiting",
+            {ts.key: "fetch" for ts in in_flight_tasks},
+        ),
+        # inc is lost and needs to be recomputed. Therefore, sum is released
+        ("free-keys", (f1.key,)),
+        (f1.key, "release-key"),
+        (f1.key, "waiting", "released", "released", {f1.key: "forgotten"}),
+        (f1.key, "released", "forgotten", "forgotten", {}),
+        # Now, we actually compute the task *once*. This must not cycle back
+        (f1.key, "compute-task"),
+        (f1.key, "released", "waiting", "waiting", {f1.key: "ready"}),
+        (f1.key, "waiting", "ready", "ready", {}),
+        (f1.key, "ready", "executing", "executing", {}),
+        (f1.key, "put-in-memory"),
+        (f1.key, "executing", "memory", "memory", {}),
+
+# Every stimulus follows these steps
+# 1. Log the input stimulus
+# 2. Provide stimulus to state machine
+# 3. Send all messages produced by the state machine
+# 4. Schedule all execute and gather_data callbacks (maybe missing)
 
 ```
-

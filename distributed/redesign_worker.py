@@ -3,8 +3,9 @@ from __future__ import annotations
 import abc
 import asyncio
 from dataclasses import dataclass
-from typing import Collection, Iterable, Literal
+from typing import Collection
 
+from distributed.batched import BatchedSend
 from distributed.spill import SpillBuffer
 from distributed.worker import TaskState
 
@@ -68,7 +69,23 @@ class GatherDepSuccess(StateMachineEvent):
 
 @dataclass
 class GatherDepError(StateMachineEvent):
-    data: object
+    worker: str
+    exc: Exception
+
+
+@dataclass
+class GatherDepMissing(StateMachineEvent):
+    key: str
+
+
+@dataclass
+class Pause(StateMachineEvent):
+    ...
+
+
+@dataclass
+class UnPause(StateMachineEvent):
+    ...
 
 
 @dataclass
@@ -99,130 +116,130 @@ class Reschedule(StateMachineEvent):
     ...
 
 
+_TRANSITION_RETURN = tuple[dict, Collection[Instruction]]
+
+
 class WorkerState:
 
     data: SpillBuffer
+    state_event_log: list[StateMachineEvent]
 
     def handle_stimulus(self, event: StateMachineEvent) -> Collection[Instruction]:
+        self.state_event_log.append(event)
         if isinstance(event, RemoveReplicas):
-            return self.handle_remove_replicas(event)
+            return self._handle_remove_replicas(event)
         else:
             raise RuntimeError(f"Unknown stimulus {event}")
 
-    def handle_remove_replicas(self, event: RemoveReplicas) -> Collection:
+    def _handle_remove_replicas(self, event: RemoveReplicas) -> Collection[Instruction]:
+        # This is where the current transition logic would reside and the
+        # transition chain would be triggered. No new logic other than
+        # unwrapping the event dataclasses if we were to use them
         ...
 
-    def handle_compute_task(
-        self, event: HandleComputeTask
-    ) -> Collection[Execute | GatherDep | FindMissing]:
+    def handle_compute_task(self, event: HandleComputeTask) -> Collection[Instruction]:
         ...
+
+    # This is effectively the logic of ``ensure_communicating`` but the
+    # transition logic is separated from coroutine scheduling. It is also only
+    # called during transition OR when unpausing
+    def _ensure_communicating(self, stimulus_id: str) -> _TRANSITION_RETURN:
+        recommendations = {}
+        instructions = []
+
+        # This is pseudo/simplified code of what is currently in
+        # ensure_communicating
+        while self.data_needed and (
+            len(self.in_flight_workers) < self.total_out_connections
+            or self.comm_nbytes < self.comm_threshold_bytes
+        ):
+            next_ = self.data_needed.pop()
+            worker = self.worker_to_fetch_from(next_)
+            to_gather = self.select_keys_for_gather(worker, next_)
+            recommendations.update({k: ("flight", worker) for k in to_gather})
+            instructions.append(GatherDep(stimulus_id, worker, to_gather))
+
+        return recommendations, instructions
+
+    def transition_released_fetch(
+        self, ts: TaskState, *, stimulus_id: str
+    ) -> _TRANSITION_RETURN:
+        for w in ts.who_has:
+            self.pending_data_per_worker[w].push(ts)
+        ts.state = "fetch"
+        ts.done = False
+        self.data_needed.push(ts)
+        # The current released->fetch does never return any content
+        return self._ensure_communicating(stimulus_id)
+
+    async def memory_monitor(self):
+        def check_pause(memory):
+            if unpaused:  # type: ignore
+                self.handle_stimulus(UnPause())
+
+        check_pause(42)
 
 
 class WorkerBase(abc.ABC):
-    def __init__(self):
-        self.queue = asyncio.Queue()
-        self.state = WorkerState()
-        self.log: list[StateMachineEvent] = []
-        self.paused_reconciler = asyncio.Event()
-        self.paused_reconciler.set()
-        self.event_handlers = {GatherDep: self.gather_dep}
+    batched_stream: BatchedSend
+    state: WorkerState
+    instruction_history: list[StateMachineEvent]
 
-    async def reconciler(self):
-        while True:  # status == running
-
-            # Can be used to freeze the state machine in place
-            await self.paused_reconciler.wait()
-
-            event = await self.queue.get()
-            self.log.append(event)
-            # TODO: This is a great place for low level plugins
-            instructions = self.state.handle_stimulus(event)
-            for inst in instructions:
-                self.implement_instruction(inst)
-
-    def implement_instruction(self, inst: Instruction):
+    def _handle_stimulus_from_future(self, fut):
         try:
-            handler = self.event_handlers[inst]
-            coro = handler(inst)
-        except KeyError:
-            raise RuntimeError("Unknown instruction")
-        fut = asyncio.ensure_future(coro)
-        fut.add_done_callback(self._instruction_done)
-
-    def _instruction_done(self, fut):
-        try:
-            res = fut.result()
+            stim = fut.result()
         except Exception:
-            raise RuntimeError(
-                "Handlers must not raise exceptions. Please report this to <link>"
-            )
-        if isinstance(res, Iterable):
-            for item in res:
-                self.queue.put_nowait(item)
-        else:
-            self.queue.put_nowait(res)
-        self.queue.task_done()
+            # This must never happen and the handlers must implement exception handling.
+            # If we implement error handling here, this should raise some exception that
+            # can be immediately filed as a bug report
+            raise
+        for s in stim:
+            self._handle_stimulus(s)
 
-    def __await__(self):
-        return self
+    def _handle_stimulus(self, stim: StateMachineEvent):
+        self.instruction_history.append(stim)
+        instructions = self.state.handle_stimulus(stim)
+        for inst in instructions:
+            fut = None
+            # TODO: collect all futures and await/cancel when closing?
+            if isinstance(inst, GatherDep):
+                fut = asyncio.ensure_future(self._gather_data(inst))
+            elif isinstance(inst, Execute):
+                fut = asyncio.ensure_future(self.execute(inst))
+            elif isinstance(inst, SendMsg):
+                self.batched_stream.send(inst.payload)
+            else:
+                raise RuntimeError("Unknown instruction")
+            if fut:
+                fut.add_done_callback(self._handle_stimulus_from_future)
 
     @abc.abstractmethod
-    async def execute(
-        self, inst: Execute
-    ) -> ExecuteSuccess | ExecuteFailure | Reschedule:
-        ...
+    async def execute(self, inst: Execute) -> Collection[Instruction]:
+        raise NotImplementedError
 
     @abc.abstractmethod
-    async def gather_dep(
-        self, inst: GatherDep
-    ) -> Collection[GatherDepSuccess] | GatherBusy | RemoteDead | GatherDepError:
+    async def _gather_data(self, inst: GatherDep) -> Collection[Instruction]:
         raise NotImplementedError
 
 
 class Worker(WorkerBase):
-    def __init__(self):
-        stream_handlers = {
-            "remove-replicas": self.handle_remove_replicas,
-            "compute-task": self.handle_compute_task,
-        }
-        stream_handlers
-
-    def handle_remove_replicas(
-        self, keys: Collection[str], stimulus_id: str
-    ) -> Literal["OK"]:
-        event = RemoveReplicas(stimulus_id, keys)
-        self.queue.put_nowait(event)
-
-        return "OK"
-
-    async def gather_dep(
-        self, inst: GatherDep
-    ) -> Collection[GatherDepSuccess] | GatherBusy | GatherDepError:
+    async def _gather_data(self, inst: GatherDep) -> Collection[StateMachineEvent]:
         async def get_data(inst):
             ...
 
         try:
             await get_data(inst)
-        except Exception:
-            return GatherDepError("new-stim", "foo")
+        except Exception as exc:
+            return [GatherDepError("new-stim", "foo", exc)]
         return [GatherDepSuccess("new-stim", "foo")]
-
-    def handle_compute_task(
-        self, key: str, who_has: dict, priority: tuple, stimulus_id
-    ) -> Literal["OK"]:
-        event = HandleComputeTask(stimulus_id, key, who_has, priority)
-        self.queue.put_nowait(event)
-        return "OK"
 
 
 class FakeWorker(WorkerBase):
     """This class can be used for testing to simulate a busy worker A"""
 
-    async def gather_dep(
-        self, inst: GatherDep
-    ) -> Collection[GatherDepSuccess] | GatherBusy | RemoteDead | GatherDepError:
+    async def _gather_data(self, inst: GatherDep) -> Collection[StateMachineEvent]:
         if inst.worker == "A":
-            return GatherBusy("foo", 2)
+            return [GatherBusy("foo", 2)]
         else:
             return [GatherDepSuccess("foo", "bar") for _ in inst.to_gather]
 
