@@ -284,13 +284,32 @@ async def connect(
     # gh3104, gh4176, gh4167
     intermediate_cap = timeout / 5
     active_exception = None
+    tasks = set()
     while time_left() > 0:
         try:
-            comm = await asyncio.wait_for(
-                connector.connect(loc, deserialize=deserialize, **connection_args),
-                timeout=min(intermediate_cap, time_left()),
+            task = asyncio.create_task(
+                connector.connect(loc, deserialize=deserialize, **connection_args)
             )
-            break
+            tasks.add(task)
+            done, pending = await asyncio.wait(
+                tasks,
+                timeout=min(intermediate_cap, time_left()),
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            comm = None
+            failed = set()
+            for task in done:
+                tasks.discard(task)
+                if not task.exception():
+                    comm = task.result()
+                else:
+                    failed.add(task.exception())
+            if not comm and failed:
+                raise failed.pop()
+            if comm:
+                break
+            for task in pending:
+                task.cancel()
         except FatalCommClosedError:
             raise
         # Note: CommClosed inherits from OSError
