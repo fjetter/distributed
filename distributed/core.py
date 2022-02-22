@@ -601,9 +601,7 @@ class Server:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
         finally:
             await comm.close()

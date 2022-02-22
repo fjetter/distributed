@@ -1780,9 +1780,7 @@ class TaskState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
 
     def get_nbytes_deps(self):
         nbytes: Py_ssize_t = 0
@@ -2406,9 +2404,7 @@ class SchedulerState:
         except Exception:
             logger.exception("Error transitioning %r from %r to %r", key, start, finish)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def _transitions(self, recommendations: dict, client_msgs: dict, worker_msgs: dict):
@@ -2502,9 +2498,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_no_worker_waiting(self, key):
@@ -2549,9 +2543,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_no_worker_memory(
@@ -2585,9 +2577,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     @ccall
@@ -2757,9 +2747,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_waiting_memory(
@@ -2797,9 +2785,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_processing_memory(
@@ -2893,9 +2879,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_memory_released(self, key, safe: bint = False):
@@ -2963,9 +2947,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_released_erred(self, key):
@@ -3008,9 +2990,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_erred_released(self, key):
@@ -3056,9 +3036,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_waiting_released(self, key):
@@ -3093,9 +3071,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_processing_released(self, key):
@@ -3144,9 +3120,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_processing_erred(
@@ -3233,9 +3207,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_no_worker_released(self, key):
@@ -3263,9 +3235,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     @ccall
@@ -3318,9 +3288,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def transition_released_forgotten(self, key):
@@ -3356,9 +3324,7 @@ class SchedulerState:
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     ##############################
@@ -5285,9 +5251,7 @@ class Scheduler(SchedulerState, ServerNode):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def validate_state(self, allow_overlap=False):
@@ -5487,9 +5451,7 @@ class Scheduler(SchedulerState, ServerNode):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def handle_uncaught_error(self, **msg):

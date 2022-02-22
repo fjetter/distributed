@@ -261,9 +261,7 @@ class WorkStealing(SchedulerPlugin):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     async def move_task_confirm(self, *, key, state, stimulus_id, worker=None):
@@ -341,9 +339,7 @@ class WorkStealing(SchedulerPlugin):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
         finally:
             self.scheduler.check_idle_saturated(thief)

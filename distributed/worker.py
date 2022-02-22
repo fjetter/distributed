@@ -3240,9 +3240,7 @@ class Worker(ServerNode):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     def handle_steal_request(self, key, stimulus_id):
@@ -3346,9 +3344,7 @@ class Worker(ServerNode):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     ################
@@ -3520,9 +3516,7 @@ class Worker(ServerNode):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     async def execute(self, key, *, stimulus_id):
@@ -4048,9 +4042,7 @@ class Worker(ServerNode):
         except Exception as e:
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
 
             raise AssertionError(
                 f"Invalid TaskState encountered for {ts!r}.\nStory:\n{self.story(ts)}\n"
@@ -4099,9 +4091,7 @@ class Worker(ServerNode):
             self.loop.add_callback(self.close)
             logger.exception(e)
             if LOG_PDB:
-                import pdb
-
-                pdb.set_trace()
+                breakpoint()
             raise
 
     #######################################
