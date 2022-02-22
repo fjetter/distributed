@@ -1781,6 +1781,7 @@ class TaskState:
             logger.exception(e)
             if LOG_PDB:
                 breakpoint()
+            raise
 
     def get_nbytes_deps(self):
         nbytes: Py_ssize_t = 0
