@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
-import random
 import sys
 import weakref
 from abc import ABC, abstractmethod
@@ -304,8 +303,9 @@ async def connect(
             intermediate_cap = timeout
             # FullJitter see https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
 
-            upper_cap = min(time_left(), backoff_base * (2**attempt))
-            backoff = random.uniform(0, upper_cap)
+            # upper_cap = min(time_left(), backoff_base * (2**attempt))
+            # backoff = random.uniform(0, upper_cap)
+            backoff = backoff_base
             attempt += 1
             logger.debug(
                 "Could not connect to %s, waiting for %s before retrying", loc, backoff
