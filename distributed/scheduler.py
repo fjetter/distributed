@@ -7925,24 +7925,24 @@ class Scheduler(SchedulerState, ServerNode):
             last = time()
             next_time = timedelta(seconds=0.1)
 
-            if self.proc.cpu_percent() < 50:
-                workers: list = list(parent._workers.values())
-                nworkers: Py_ssize_t = len(workers)
-                i: Py_ssize_t
-                for i in range(nworkers):
-                    ws: WorkerState = workers[worker_index % nworkers]
-                    worker_index += 1
-                    try:
-                        if ws is None or not ws._processing:
-                            continue
-                        parent._reevaluate_occupancy_worker(ws)
-                    finally:
-                        del ws  # lose ref
+            # if self.proc.cpu_percent() < 50:
+            workers: list = list(parent._workers.values())
+            nworkers: Py_ssize_t = len(workers)
+            i: Py_ssize_t
+            for i in range(nworkers):
+                ws: WorkerState = workers[worker_index % nworkers]
+                worker_index += 1
+                try:
+                    if ws is None or not ws._processing:
+                        continue
+                    parent._reevaluate_occupancy_worker(ws)
+                finally:
+                    del ws  # lose ref
 
-                    duration = time() - last
-                    if duration > 0.005:  # 5ms since last release
-                        next_time = timedelta(seconds=duration * 5)  # 25ms gap
-                        break
+                duration = time() - last
+                if duration > 0.005:  # 5ms since last release
+                    next_time = timedelta(seconds=duration * 5)  # 25ms gap
+                    break
 
             self.loop.add_timeout(
                 next_time, self.reevaluate_occupancy, worker_index=worker_index
