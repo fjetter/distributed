@@ -199,7 +199,9 @@ class Server:
         self.io_loop = io_loop or IOLoop.current()
         self.loop = self.io_loop
 
-        if not hasattr(self.io_loop, "profile"):
+        if not hasattr(self.io_loop, "profile") and dask.config.get(
+            "distributed.worker.profile.enabled"
+        ):
             ref = weakref.ref(self.io_loop)
 
             def stop():
