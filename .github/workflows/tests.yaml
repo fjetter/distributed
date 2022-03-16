@@ -131,6 +131,7 @@ jobs:
 
           pytest distributed \
             -m "not avoid_ci and ${{ matrix.partition }}" --runslow \
+            -k test_nanny_worker_port_range \
             --leaks=fds,processes,threads \
             --junitxml reports/pytest.xml -o junit_suite_name=$TEST_ID \
             --cov=distributed --cov-report=xml \

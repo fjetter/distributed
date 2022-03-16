@@ -73,7 +73,9 @@ def test_nanny_worker_port_range(loop):
                 "--no-dashboard",
             ]
         ):
+            assert not loop.asyncio_loop.is_running()
             with Client("127.0.0.1:9359", loop=loop) as c:
+                assert loop.asyncio_loop.is_running()
                 start = time()
                 while len(c.scheduler_info()["workers"]) < n_workers:
                     sleep(0.1)
