@@ -3915,7 +3915,6 @@ class Scheduler(SchedulerState, ServerNode):
             "update-data": self.update_data,
             "report-key": self.report_on_key,
             "client-releases-keys": self.client_releases_keys,
-            "heartbeat-client": self.client_heartbeat,
             "close-client": self.remove_client,
             "restart": self.restart,
             "subscribe-topic": self.subscribe_topic,
@@ -3962,6 +3961,7 @@ class Scheduler(SchedulerState, ServerNode):
             "set_metadata": self.set_metadata,
             "set_restrictions": self.set_restrictions,
             "heartbeat_worker": self.heartbeat_worker,
+            "heartbeat_client": self.heartbeat_client,
             "get_task_status": self.get_task_status,
             "get_task_stream": self.get_task_stream,
             "get_task_prefix_states": self.get_task_prefix_states,
@@ -5238,11 +5238,18 @@ class Scheduler(SchedulerState, ServerNode):
         _client_releases_keys(parent, keys=keys, cs=cs, recommendations=recommendations)
         self.transitions(recommendations)
 
-    def client_heartbeat(self, client=None):
+    def heartbeat_client(self, client: str):
         """Handle heartbeats from Client"""
         parent: SchedulerState = cast(SchedulerState, self)
+        if client not in parent._clients:
+            return {"status": "unknown"}
         cs: ClientState = parent._clients[client]
         cs._last_seen = time()
+        return {
+            "status": "OK",
+            "info": self.identity(),
+            "heartbeat-interval": heartbeat_interval(len(parent._clients)),
+        }
 
     ###################
     # Task Validation #

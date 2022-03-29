@@ -5692,11 +5692,17 @@ def test_client_doesnt_close_given_loop(loop_in_thread, s, a, b):
         assert c.submit(inc, 2).result() == 3
 
 
-@gen_cluster(client=True, nthreads=[])
+@gen_cluster(
+    client=True,
+    nthreads=[],
+    config={
+        "distributed.client.heartbeat": "10ms",
+    },
+)
 async def test_quiet_scheduler_loss(c, s):
-    c._periodic_callbacks["scheduler-info"].interval = 10
     with captured_logger(logging.getLogger("distributed.client")) as logger:
         await s.close()
+        await asyncio.sleep(0.1)
     text = logger.getvalue()
     assert "BrokenPipeError" not in text
 
@@ -6111,7 +6117,7 @@ async def test_instances(c, s, a, b):
 @gen_cluster(client=True)
 async def test_wait_for_workers(c, s, a, b):
     future = asyncio.ensure_future(c.wait_for_workers(n_workers=3))
-    await asyncio.sleep(0.22)  # 2 chances
+    await asyncio.sleep(0.2)
     assert not future.done()
 
     w = await Worker(s.address)
