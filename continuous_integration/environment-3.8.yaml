@@ -33,6 +33,7 @@ dependencies:
   - pytest-repeat
   - pytest-rerunfailures
   - pytest-timeout
+  - pytest-xdist
   - requests
   - s3fs
   - scikit-learn
