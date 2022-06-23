@@ -2935,9 +2935,9 @@ class Scheduler(SchedulerState, ServerNode):
             preload = dask.config.get("distributed.scheduler.preload")
         if not preload_argv:
             preload_argv = dask.config.get("distributed.scheduler.preload-argv")
-        logging.info("Process preload")
+        logger.info("Process preload")
         self.preloads = preloading.process_preloads(self, preload, preload_argv)
-        logging.info("Process preload. Done.")
+        logger.info("Process preload. Done.")
 
         if isinstance(security, dict):
             security = Security(**security)
@@ -2948,7 +2948,7 @@ class Scheduler(SchedulerState, ServerNode):
             "pickle-protocol": 4
         }
 
-        logging.info("Parse address")
+        logger.info("Parse address")
         self._start_address = addresses_from_user_args(
             host=host,
             port=port,
@@ -2961,18 +2961,18 @@ class Scheduler(SchedulerState, ServerNode):
         http_server_modules = dask.config.get("distributed.scheduler.http.routes")
         show_dashboard = dashboard or (dashboard is None and dashboard_address)
         # install vanilla route if show_dashboard but bokeh is not installed
-        logging.info("Import bokeh stuff")
+        logger.info("Import bokeh stuff")
         if show_dashboard:
             try:
                 import distributed.dashboard.scheduler
             except ImportError:
                 show_dashboard = False
                 http_server_modules.append("distributed.http.scheduler.missing_bokeh")
-        logging.info("get_handlers")
+        logger.info("get_handlers")
         routes = get_handlers(
             server=self, modules=http_server_modules, prefix=http_prefix
         )
-        logging.info("Start http server")
+        logger.info("Start http server")
         self.start_http_server(routes, dashboard_address, default_port=8787)
         if show_dashboard:
             distributed.dashboard.scheduler.connect(
