@@ -126,6 +126,9 @@ applications = {
     "/individual-gpu-utilization": gpu_utilization_doc,
 }
 
+logging.getLogger("distributed.scheduler").info(
+    f"Import {__name__} defined applications"
+)
 
 template_variables: dict = {
     "pages": [
@@ -155,8 +158,12 @@ template_variables["plots"] = sorted(
     template_variables["plots"], key=lambda d: d["name"]
 )
 
+logging.getLogger("distributed.scheduler").info(
+    f"Import {__name__} sorted template_variables"
+)
 if NVML_ENABLED:
     template_variables["pages"].insert(4, "gpu")
+logging.getLogger("distributed.scheduler").info(f"Import {__name__} set Nvml thing")
 
 
 def connect(application, http_server, scheduler, prefix=""):
@@ -176,3 +183,6 @@ def connect(application, http_server, scheduler, prefix=""):
             )
         ],
     )
+
+
+logging.getLogger("distributed.scheduler").info(f"Import {__name__} set Nvml thing")

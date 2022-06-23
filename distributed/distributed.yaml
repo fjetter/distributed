@@ -241,7 +241,7 @@ distributed:
       shard: 8MiB
 
   diagnostics:
-    nvml: True
+    nvml: False
     computations:
       max-history: 100
       ignore-modules:
