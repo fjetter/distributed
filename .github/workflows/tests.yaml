@@ -32,8 +32,8 @@ jobs:
         include:
           - partition: "ci3"
             partition-label: "ci3"
-          - partition: "not ci4"
-            partition-label: "notci4"
+          - partition: "ci4"
+            partition-label: "ci4"
 
         # Uncomment to stress-test the test suite for random failures.
         # Must also change env.TEST_ID below.
