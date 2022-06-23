@@ -21,6 +21,8 @@ from distributed.metrics import time
 from distributed.utils import open_port
 from distributed.utils_test import gen_cluster, popen, requires_ipv6, wait_for_log_line
 
+pytestmark = pytest.mark.ci4
+
 
 @pytest.mark.parametrize(
     # args: (worker_port, nanny_port, n_workers, nanny)

@@ -15,6 +15,7 @@ import sys
 import tempfile
 from time import sleep
 
+import pytest
 import requests
 from click.testing import CliRunner
 
@@ -31,6 +32,8 @@ from distributed.utils_test import (
     assert_can_connect_locally_4,
     popen,
 )
+
+pytestmark = pytest.mark.ci3
 
 
 def _get_dashboard_port(client: Client) -> int:

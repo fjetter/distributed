@@ -12,7 +12,6 @@ from contextlib import suppress
 from typing import Any
 
 import click
-import pytest
 from tlz import valmap
 from tornado.ioloop import TimeoutError
 
@@ -30,7 +29,6 @@ from distributed.proctitle import (
 )
 from distributed.utils import import_term, parse_ports
 
-pytestmark = pytest.mark.ci4
 logger = logging.getLogger("distributed.dask_worker")
 
 
