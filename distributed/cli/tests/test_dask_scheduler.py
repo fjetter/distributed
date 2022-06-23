@@ -260,6 +260,7 @@ def test_scheduler_port_zero(loop):
                 assert c.scheduler.port != 8786
 
 
+@pytest.mark.repeat(10_000)
 def test_dashboard_port_zero(loop):
     pytest.importorskip("bokeh")
     port = open_port()
