@@ -1,4 +1,7 @@
 from __future__ import annotations
+import logging
+
+logging.getLogger("distributed.scheduler").info(f"Import {__name__}")
 
 import os
 from platform import uname
@@ -8,8 +11,18 @@ from packaging.version import parse as parse_version
 import dask
 
 try:
+    logging.getLogger("distributed.scheduler").info(
+        f"Import {__name__}. Try importing it"
+    )
     import pynvml
+
+    logging.getLogger("distributed.scheduler").info(
+        f"Import {__name__}. Try importing it. Success."
+    )
 except ImportError:
+    logging.getLogger("distributed.scheduler").info(
+        f"Import {__name__}. Try importing it. Failure."
+    )
     pynvml = None
 
 nvmlInitialized = False

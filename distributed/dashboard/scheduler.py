@@ -9,19 +9,6 @@ from urllib.parse import urljoin
 from tornado import web
 from tornado.ioloop import IOLoop
 
-logging.getLogger("distributed.scheduler").info(f"Import {__name__} before nvml")
-from distributed.dashboard.components.nvml import gpu_doc
-
-logging.getLogger("distributed.scheduler").info(f"Import {__name__} during nvml")
-from distributed.dashboard.components.nvml import (
-    NVML_ENABLED,
-    gpu_memory_doc,
-    gpu_utilization_doc,
-)
-
-logging.getLogger("distributed.scheduler").info(
-    f"Import {__name__} after nvml {NVML_ENABLED=}"
-)
 from distributed.dashboard.components.scheduler import (
     AggregateAction,
     BandwidthTypes,
@@ -81,7 +68,6 @@ applications = {
     "/graph": graph_doc,
     "/hardware": hardware_doc,
     "/groups": tg_graph_doc,
-    "/gpu": gpu_doc,
     "/individual-task-stream": individual_doc(
         TaskStream, 100, n_rectangles=1000, clear_interval="10s"
     ),
@@ -124,8 +110,6 @@ applications = {
     "/individual-event-loop": individual_doc(EventLoop, 500),
     "/individual-profile": individual_profile_doc,
     "/individual-profile-server": individual_profile_server_doc,
-    "/individual-gpu-memory": gpu_memory_doc,
-    "/individual-gpu-utilization": gpu_utilization_doc,
 }
 
 logging.getLogger("distributed.scheduler").info(
@@ -163,8 +147,6 @@ template_variables["plots"] = sorted(
 logging.getLogger("distributed.scheduler").info(
     f"Import {__name__} sorted template_variables"
 )
-if NVML_ENABLED:
-    template_variables["pages"].insert(4, "gpu")
 logging.getLogger("distributed.scheduler").info(f"Import {__name__} set Nvml thing")
 
 
