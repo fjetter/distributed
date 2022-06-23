@@ -10,7 +10,9 @@ from tornado import web
 from tornado.ioloop import IOLoop
 
 logging.getLogger("distributed.scheduler").info(f"Import {__name__} before nvml")
-from distributed.dashboard.components.nvml import gpu_doc  # noqa: 1708
+from distributed.dashboard.components.nvml import gpu_doc
+
+logging.getLogger("distributed.scheduler").info(f"Import {__name__} during nvml")
 from distributed.dashboard.components.nvml import (
     NVML_ENABLED,
     gpu_memory_doc,
