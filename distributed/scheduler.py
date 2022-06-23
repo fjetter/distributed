@@ -2885,7 +2885,7 @@ class Scheduler(SchedulerState, ServerNode):
         transition_counter_max=False,
         **kwargs,
     ):
-        logging.info(dask.config.config)
+        logger.info(dask.config.config)
         if loop is not None:
             warnings.warn(
                 "the loop kwarg to Scheduler is deprecated",
