@@ -10,6 +10,7 @@ import sys
 import warnings
 
 import click
+import pytest
 
 from distributed import Scheduler
 from distributed._signals import wait_for_signals
@@ -19,6 +20,7 @@ from distributed.proctitle import (
     enable_proctitle_on_current,
 )
 
+pytestmark = pytest.mark.ci3
 logger = logging.getLogger("distributed.scheduler")
 
 

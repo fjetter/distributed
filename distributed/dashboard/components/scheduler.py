@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import logging
+
+logging.getLogger("distributed.scheduler").info(f"Import {__name__}")
+
+
+import logging
 import math
 import operator
 import os

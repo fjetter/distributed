@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import logging
+
+logging.getLogger("distributed.scheduler").info(f"Import {__name__}")
+
 from urllib.parse import urljoin
 
 from tornado import web
