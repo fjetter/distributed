@@ -10,6 +10,10 @@ from distributed.utils import has_keyword
 
 dirname = os.path.dirname(__file__)
 
+import logging
+
+logger = logging.getLogger("distributed.scheduler")
+
 
 class RequestHandler(web.RequestHandler):
     def initialize(self, dask_server=None, extra=None):
@@ -37,6 +41,7 @@ def get_handlers(server, modules: list[str], prefix="/"):  # type: ignore[no-unt
 
     _routes = []
     for module_name in modules:
+        logger.info(f"Import module {module_name}")
         module = importlib.import_module(module_name)
         _routes.extend(module.routes)
 
