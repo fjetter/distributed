@@ -123,7 +123,9 @@ jobs:
           set -o pipefail
           mkdir reports
 
-          pytest distributed \
+          pytest distributed/cli/tests/test_dask_scheduler.py::test_dashboard_port_zero \
+            --count 100000 \
+            -sx \
             -m "not avoid_ci and ${{ matrix.partition }}" --runslow \
             --leaks=fds,processes,threads \
             --junitxml reports/pytest.xml -o junit_suite_name=$TEST_ID \
