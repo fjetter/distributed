@@ -123,7 +123,7 @@ jobs:
           set -o pipefail
           mkdir reports
 
-          pytest distributed/cli/tests/test_dask_scheduler.py::test_dashboard_port_zero \
+          pytest distributed/cli/tests \
             --count 100000 \
             -sx \
             -m "not avoid_ci and ${{ matrix.partition }}" --runslow \
