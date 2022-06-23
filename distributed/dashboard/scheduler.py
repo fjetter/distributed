@@ -9,11 +9,16 @@ from urllib.parse import urljoin
 from tornado import web
 from tornado.ioloop import IOLoop
 
+logging.getLogger("distributed.scheduler").info(f"Import {__name__} before nvml")
 from distributed.dashboard.components.nvml import gpu_doc  # noqa: 1708
 from distributed.dashboard.components.nvml import (
     NVML_ENABLED,
     gpu_memory_doc,
     gpu_utilization_doc,
+)
+
+logging.getLogger("distributed.scheduler").info(
+    f"Import {__name__} after nvml {NVML_ENABLED=}"
 )
 from distributed.dashboard.components.scheduler import (
     AggregateAction,
@@ -51,8 +56,14 @@ from distributed.dashboard.components.scheduler import (
     tg_graph_doc,
     workers_doc,
 )
+
+logging.getLogger("distributed.scheduler").info(
+    f"Import {__name__} after more components"
+)
 from distributed.dashboard.core import BokehApplication
 from distributed.dashboard.worker import counters_doc
+
+logging.getLogger("distributed.scheduler").info(f"Import {__name__} done with imports")
 
 applications = {
     "/system": systemmonitor_doc,
