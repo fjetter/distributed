@@ -34,6 +34,8 @@ tags
 
 reports/
 test_report.*
+*.db
+summary-*.md
 test_short_report.html
 
 # Test failures will dump the cluster state in here

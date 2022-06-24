@@ -9,7 +9,7 @@ import shelve
 import sys
 import zipfile
 from collections.abc import Iterator
-from typing import Any
+from typing import Any, Iterable, cast
 
 import altair
 import altair_saver
@@ -102,6 +102,36 @@ def maybe_get_next_page_path(response: requests.Response) -> str | None:
     return next_page_path
 
 
+def get_jobs(workflow):
+    page = 1
+    total_count = None
+    with shelve.open("jobs_pkl") as cache:
+        url = workflow["jobs_url"]
+        try:
+            jobs = cache[url]
+        except KeyError:
+            jobs = []
+            while total_count is None or len(jobs) < total_count:
+                resp = get_from_github(
+                    workflow["jobs_url"], {"per_page": 100, "page": page}
+                ).json()
+                if total_count is None:
+                    total_count = resp["total_count"]
+                jobs.extend(resp["jobs"])
+                page += 1
+            cache[url] = jobs
+
+    df_jobs = pandas.DataFrame.from_records(jobs)
+    extracted = df_jobs.name.str.extract(r"\(([\w\-]+), (\d\.\d+), (\d+)\)").dropna()
+    df_jobs["OS"] = extracted[0]
+    df_jobs["python_version"] = extracted[1]
+    df_jobs["job_run"] = extracted[2]  # only for CI stress
+    df_jobs["suite_name"] = (
+        df_jobs["OS"] + "-" + df_jobs["python_version"] + "-" + df_jobs["job_run"]
+    )
+    return df_jobs
+
+
 def get_workflow_listing(repo: str, branch: str, event: str, days: int) -> list[dict]:
     """
     Get a list of workflow runs from GitHub actions.
@@ -158,12 +188,12 @@ def download_and_parse_artifact(url: str) -> junitparser.JUnitXml | None:
         f = zipfile.ZipFile(io.BytesIO(r.content))
         run = junitparser.JUnitXml.fromstring(f.read(f.filelist[0].filename))
         return run
-    except Exception:
-        print(f"Failed to download/parse {url}")
+    except Exception as exc:
+        print(f"Failed to download/parse {url} {exc}")
         return None
 
 
-def dataframe_from_jxml(run: list) -> pandas.DataFrame:
+def dataframe_from_jxml(run: Iterable) -> pandas.DataFrame:
     """
     Turn a parsed JXML into a pandas dataframe
     """
@@ -171,8 +201,10 @@ def dataframe_from_jxml(run: list) -> pandas.DataFrame:
     tname = []
     status = []
     message = []
+    sname = []
     for suite in run:
         for test in suite:
+            sname.append(suite.name)
             fname.append(test.classname)
             tname.append(test.name)
             s = "✓"
@@ -195,7 +227,13 @@ def dataframe_from_jxml(run: list) -> pandas.DataFrame:
             status.append(s)
             message.append(html.escape(m))
     df = pandas.DataFrame(
-        {"file": fname, "test": tname, "status": status, "message": message}
+        {
+            "file": fname,
+            "test": tname,
+            "status": status,
+            "message": message,
+            "suite_name": sname,
+        }
     )
 
     # There are sometimes duplicate tests in the report for some unknown reason.
@@ -212,7 +250,7 @@ def dataframe_from_jxml(run: list) -> pandas.DataFrame:
         else:
             return group
 
-    return df.groupby(["file", "test"]).agg(dedup)
+    return df.groupby(["file", "test"], as_index=False).agg(dedup)
 
 
 def download_and_parse_artifacts(
@@ -262,6 +300,8 @@ def download_and_parse_artifacts(
     # FIXME https://github.com/python/typeshed/pull/8190
     with shelve.open("test_report") as cache:  # type: ignore[assignment]
         for w in workflows:
+            jobs = get_jobs(w)
+            generate_summary_markdown(jobs, f"summary-{w['id']}")
             w["dfs"] = []
             for a in w["artifacts"]:
                 url = a["archive_download_url"]
@@ -269,18 +309,20 @@ def download_and_parse_artifacts(
                 try:
                     df = cache[url]
                 except KeyError:
+                    if jobs is None:
+                        jobs = get_jobs(w)
                     xml = download_and_parse_artifact(url)
                     if xml:
-                        df = dataframe_from_jxml(xml)
+                        df = dataframe_from_jxml(cast(Iterable, xml))
                         # Note: we assign a column with the workflow timestamp rather
                         # than the artifact timestamp so that artifacts triggered under
                         # the same workflow can be aligned according to the same trigger
                         # time.
+                        df = df.merge(jobs.drop(columns="status"), on="suite_name")
                         df = df.assign(
                             name=a["name"],
                             suite=suite_from_name(a["name"]),
                             date=w["created_at"],
-                            url=w["html_url"],
                         )
                     else:
                         df = None
@@ -292,6 +334,23 @@ def download_and_parse_artifacts(
                 ndownloaded += 1
                 if ndownloaded and not ndownloaded % 20:
                     print(f"{ndownloaded}... ", end="")
+
+
+def generate_summary_markdown(jobs_df, file_prefix="summary"):
+    jobs_df = jobs_df[~jobs_df.OS.isna()]
+    jobs_df.conclusion.fillna("cancelled")
+    table = (
+        jobs_df.groupby(["python_version", "OS", "conclusion"])
+        .id.count()
+        .reset_index()
+        .pivot(index=["OS", "python_version"], columns="conclusion")
+        .fillna(0)
+        .sort_index()
+    )
+    table.columns = table.columns.droplevel()
+    table["total"] = table["failure"] + table["success"] + table["cancelled"]
+    table["success_rate"] = table["success"] / table["total"]
+    table.to_markdown(file_prefix + ".md", tablefmt="github")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -313,11 +372,21 @@ def main(argv: list[str] | None = None) -> None:
             max_workflows=args.max_workflows,
         )
     )
-
     total = pandas.concat(dfs, axis=0)
+    required_columns = [
+        "test",
+        "date",
+        "job_run",
+        "suite",
+        "file",
+        "html_url",
+        "status",
+        "message",
+    ]
+    # Reduce the size of the DF since the entire thing is encoded in the vega spec
+    total = total[required_columns]
     grouped = (
-        # FIXME https://github.com/pandas-dev/pandas-stubs/issues/42
-        total.groupby(total.index)  # type: ignore
+        total.groupby([total.file, total.test])
         .filter(lambda g: (g.status == "x").sum() >= args.nfails)
         .reset_index()
         .assign(test=lambda df: df.file + "." + df.test)
@@ -355,9 +424,9 @@ def main(argv: list[str] | None = None) -> None:
             altair.Chart(df)
             .mark_rect(stroke="gray")
             .encode(
-                x=altair.X("date:O", scale=altair.Scale(domain=sorted(list(times)))),
+                x=altair.X("job_run:O"),
                 y=altair.Y("suite:N", title=None),
-                href=altair.Href("url:N"),
+                href=altair.Href("html_url:N"),
                 color=altair.Color(
                     "status:N",
                     scale=altair.Scale(
@@ -365,7 +434,7 @@ def main(argv: list[str] | None = None) -> None:
                         range=list(COLORS.values()),
                     ),
                 ),
-                tooltip=["suite:N", "date:O", "status:N", "message:N", "url:N"],
+                tooltip=["suite:N", "status:N", "message:N", "html_url:N"],
             )
             .properties(title=name)
             | altair.Chart(df_agg.assign(_="_"))
