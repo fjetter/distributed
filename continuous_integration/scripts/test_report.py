@@ -118,19 +118,13 @@ def get_jobs(run):
             cache[url] = jobs
 
     df_jobs = pandas.DataFrame.from_records(jobs)
-    extracted = df_jobs.name.str.extract(
-        r"\(([\w\-]+), (\d\.\d+),\s([\w|\s]+)\)"
-    ).dropna()
+    extracted = df_jobs.name.str.extract(r"\(([\w\-]+), (\d\.\d+), (\d+)\)").dropna()
     df_jobs["OS"] = extracted[0]
     df_jobs["python_version"] = extracted[1]
     df_jobs["partition"] = extracted[2]
     # We later need to join on this. Somehow the job ID is not part of the workflow schema and we have no other way to join
     df_jobs["suite_name"] = (
-        df_jobs["OS"]
-        + "-"
-        + df_jobs["python_version"]
-        + "-"
-        + df_jobs["partition"].str.replace(" ", "")
+        df_jobs["OS"] + "-" + df_jobs["python_version"] + "-" + df_jobs["partition"]
     )
 
     return df_jobs
@@ -308,6 +302,7 @@ def download_and_parse_artifacts(
 
     for r in runs:
         jobs_df = get_jobs(r)
+        generate_summary_markdown(jobs_df)
         r["dfs"] = []
         for a in r["artifacts"]:
             url = a["archive_download_url"]
@@ -320,25 +315,39 @@ def download_and_parse_artifacts(
             # than the artifact timestamp so that artifacts triggered under
             # the same workflow run can be aligned according to the same trigger
             # time.
-            html_url = jobs_df[jobs_df["suite_name"] == a["name"]].html_url.unique()
-            assert (
-                len(html_url) == 1
-            ), f"Artifact suit name {a['name']} did not match any jobs dataframe {jobs_df['suite_name'].unique()}"
-            html_url = html_url[0]
-            assert html_url is not None
-            df2 = df.assign(
+
+            df2 = df.merge(jobs_df.drop(columns="status"), how="left", on="suite_name")
+            df3 = df2.assign(
                 name=a["name"],
                 suite=suite_from_name(a["name"]),
                 date=r["created_at"],
-                html_url=html_url,
             )
 
-            if df2 is not None:
-                yield df2
+            if df3 is not None:
+                yield df3
 
             ndownloaded += 1
             if ndownloaded and not ndownloaded % 20:
                 print(f"{ndownloaded}... ", end="")
+
+
+def generate_summary_markdown(jobs_df, file_prefix="summary"):
+    jobs_df.conclusion = jobs_df.conclusion.fillna("cancelled")
+    jobs_df = jobs_df[~jobs_df.OS.isna()]
+    table = (
+        jobs_df.groupby(["python_version", "OS", "conclusion"])
+        .id.count()
+        .reset_index()
+        .pivot(index=["OS", "python_version"], columns="conclusion")
+        .fillna(0)
+        .sort_index()
+    )
+    table.columns = table.columns.droplevel()
+    if "cancelled" not in table.columns:
+        table["cancelled"] = 0.0
+    table["total"] = table["failure"] + table["success"] + table["cancelled"]
+    table["success_rate"] = table["success"] / table["total"]
+    table.to_markdown(file_prefix + ".md", tablefmt="github")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -361,16 +370,17 @@ def main(argv: list[str] | None = None) -> None:
         )
     )
     total = pandas.concat(dfs, axis=0)
-    # Reduce the size of the DF since the entire thing is encoded in the vega spec
     required_columns = [
         "test",
         "date",
+        "partition",
         "suite",
         "file",
         "html_url",
         "status",
         "message",
     ]
+    # Reduce the size of the DF since the entire thing is encoded in the vega spec
     total = total[required_columns]
     grouped = (
         total.groupby([total.file, total.test])
@@ -405,13 +415,13 @@ def main(argv: list[str] | None = None) -> None:
             .to_frame(name="Pass Rate")
             .reset_index()
         )
-
+        breakpoint()
         # Create a grid with hover tooltip for error messages
         charts.append(
             altair.Chart(df)
             .mark_rect(stroke="gray")
             .encode(
-                x=altair.X("date:O", scale=altair.Scale(domain=sorted(list(times)))),
+                x=altair.X("partition:O"),
                 y=altair.Y("suite:N", title=None),
                 href=altair.Href("html_url:N"),
                 color=altair.Color(
@@ -421,7 +431,7 @@ def main(argv: list[str] | None = None) -> None:
                         range=list(COLORS.values()),
                     ),
                 ),
-                tooltip=["suite:N", "date:O", "status:N", "message:N", "html_url:N"],
+                tooltip=["suite:N", "status:N", "message:N", "html_url:N"],
             )
             .properties(title=name)
             | altair.Chart(df_agg.assign(_="_"))
