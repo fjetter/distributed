@@ -286,6 +286,13 @@ async def test_no_delay_during_large_transfer(c, s, w):
 
 
 @pytest.mark.slow
+@pytest.mark.skipif(
+    # This test may become flaky due to slow CI. Skipping on windows is "safe"
+    # because currently OSX CI is slower than WIN. If this test gets flaky on
+    # OSX as well, this should be thoroughly investigated before skipping
+    WINDOWS,
+    reason="Spurious disk errors on windows https://github.com/dask/distributed/issues/6641",
+)
 @gen_cluster(
     client=True,
     Worker=Nanny,
