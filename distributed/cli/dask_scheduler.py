@@ -229,7 +229,7 @@ def main(
     try:
         asyncio.run(run())
     finally:
-        logger.info("End scheduler")
+        logger.info("End scheduler", exc_info=True)
 
 
 if __name__ == "__main__":
