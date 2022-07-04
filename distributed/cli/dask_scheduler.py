@@ -24,6 +24,15 @@ logger = logging.getLogger("distributed.scheduler")
 
 pem_file_option_type = click.Path(exists=True, resolve_path=True)
 
+import time
+import faulthandler
+
+
+def observe(interval=1):
+    while True:
+        time.sleep(interval)
+        faulthandler.dump_traceback()
+
 
 @click.command(context_settings=dict(ignore_unknown_options=True))
 @click.option("--host", type=str, default="", help="URI, IP or hostname of this server")
@@ -135,7 +144,16 @@ def main(
     **kwargs,
 ):
     g0, g1, g2 = gc.get_threshold()  # https://github.com/dask/distributed/issues/1653
+    faulthandler.enable()
+
     gc.set_threshold(g0 * 3, g1 * 3, g2 * 3)
+    import threading
+
+    t = threading.Thread(
+        target=observe,
+        daemon=True,
+    )
+    t.start()
 
     enable_proctitle_on_current()
     enable_proctitle_on_children()
