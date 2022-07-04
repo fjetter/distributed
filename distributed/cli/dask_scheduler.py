@@ -28,11 +28,6 @@ import time
 import faulthandler
 
 
-def observe(interval=1):
-    while True:
-        time.sleep(interval)
-        faulthandler.dump_traceback()
-
 
 @click.command(context_settings=dict(ignore_unknown_options=True))
 @click.option("--host", type=str, default="", help="URI, IP or hostname of this server")
@@ -147,13 +142,6 @@ def main(
     faulthandler.enable()
 
     gc.set_threshold(g0 * 3, g1 * 3, g2 * 3)
-    import threading
-
-    t = threading.Thread(
-        target=observe,
-        daemon=True,
-    )
-    t.start()
 
     enable_proctitle_on_current()
     enable_proctitle_on_children()
@@ -205,7 +193,7 @@ def main(
 
     async def run():
         logger.info("-" * 47)
-
+        faulthandler.dump_traceback_later(1, repeat=True)
         scheduler = Scheduler(
             security=sec,
             host=host,
