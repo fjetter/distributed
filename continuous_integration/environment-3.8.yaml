@@ -25,7 +25,6 @@ dependencies:
   - pre-commit
   - prometheus_client
   - psutil
-  - pyarrow<6
   - pynvml  # Only tested here
   - pytest
   - pytest-cov
