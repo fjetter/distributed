@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import faulthandler
 import gc
 import logging
 import os
@@ -23,10 +24,6 @@ logger = logging.getLogger("distributed.scheduler")
 
 
 pem_file_option_type = click.Path(exists=True, resolve_path=True)
-
-import time
-import faulthandler
-
 
 
 @click.command(context_settings=dict(ignore_unknown_options=True))
@@ -139,7 +136,6 @@ def main(
     **kwargs,
 ):
     g0, g1, g2 = gc.get_threshold()  # https://github.com/dask/distributed/issues/1653
-    faulthandler.enable()
 
     gc.set_threshold(g0 * 3, g1 * 3, g2 * 3)
 
