@@ -12,7 +12,7 @@ dependencies:
   - click
   - cloudpickle
   - coverage
-  - cython==0.29.22  # Only tested here; also a dependency of crick
+  - cython==0.29.24  # Only tested here; also a dependency of crick
   - dask  # overridden by git tip below
   - filesystem-spec
   - h5py
