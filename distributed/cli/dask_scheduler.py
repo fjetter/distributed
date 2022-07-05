@@ -11,6 +11,7 @@ import sys
 import warnings
 
 import click
+import pandas  # noqa
 
 from distributed import Scheduler
 from distributed._signals import wait_for_signals
