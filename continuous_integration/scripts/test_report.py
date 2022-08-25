@@ -49,12 +49,12 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--repo",
-        default="dask/distributed",
+        default="fjetter/distributed",
         help="github repository",
     )
     parser.add_argument(
         "--branch",
-        default="main",
+        default="test_reports_on_fork",
         help="git branch",
     )
     parser.add_argument(
