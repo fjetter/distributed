@@ -100,18 +100,13 @@ from distributed.utils import (
 from distributed.utils_comm import gather_from_workers, pack_data, retry_operation
 from distributed.utils_perf import disable_gc_diagnosis, enable_gc_diagnosis
 from distributed.versions import get_versions
-from distributed.worker_memory import (
-    DeprecatedMemoryManagerAttribute,
-    DeprecatedMemoryMonitor,
-    WorkerMemoryManager,
-)
+from distributed.worker_memory import WorkerMemoryManager
 from distributed.worker_state_machine import (
     NO_VALUE,
     AcquireReplicasEvent,
     BaseWorker,
     CancelComputeEvent,
     ComputeTaskEvent,
-    DeprecatedWorkerStateAttribute,
     ExecuteFailureEvent,
     ExecuteSuccessEvent,
     FindMissingEvent,
@@ -438,11 +433,9 @@ class Worker(BaseWorker, ServerNode):
         *,
         scheduler_file: str | None = None,
         nthreads: int | None = None,
-        loop: IOLoop | None = None,  # Deprecated
         local_directory: str | None = None,
         services: dict | None = None,
         name: Any | None = None,
-        reconnect: bool | None = None,
         executor: Executor | dict[str, Executor] | Literal["offload"] | None = None,
         resources: dict[str, float] | None = None,
         silence_logs: int | None = None,
@@ -486,36 +479,10 @@ class Worker(BaseWorker, ServerNode):
             ]  # (constructor, kwargs to constructor)
             | None  # create internally
         ) = None,
-        # Deprecated parameters; please use dask config instead.
-        memory_target_fraction: float | Literal[False] | None = None,
-        memory_spill_fraction: float | Literal[False] | None = None,
-        memory_pause_fraction: float | Literal[False] | None = None,
         ###################################
         # Parameters to Server
         **kwargs,
     ):
-        if reconnect is not None:
-            if reconnect:
-                raise ValueError(
-                    "The `reconnect=True` option for `Worker` has been removed. "
-                    "To improve cluster stability, workers now always shut down in the face of network disconnects. "
-                    "For details, or if this is an issue for you, see https://github.com/dask/distributed/issues/6350."
-                )
-            else:
-                warnings.warn(
-                    "The `reconnect` argument to `Worker` is deprecated, and will be removed in a future release. "
-                    "Worker reconnection is now always disabled, so passing `reconnect=False` is unnecessary. "
-                    "See https://github.com/dask/distributed/issues/6350 for details.",
-                    DeprecationWarning,
-                    stacklevel=2,
-                )
-        if loop is not None:
-            warnings.warn(
-                "The `loop` argument to `Worker` is ignored, and will be removed in a future release. "
-                "The Worker always binds to the current loop",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         self.nanny = nanny
         self._lock = threading.Lock()
 
@@ -738,9 +705,6 @@ class Worker(BaseWorker, ServerNode):
             data=data,
             nthreads=nthreads,
             memory_limit=memory_limit,
-            memory_target_fraction=memory_target_fraction,
-            memory_spill_fraction=memory_spill_fraction,
-            memory_pause_fraction=memory_pause_fraction,
         )
         state = WorkerState(
             nthreads=nthreads,
@@ -834,47 +798,9 @@ class Worker(BaseWorker, ServerNode):
         """
         return self.memory_manager.data
 
-    # Deprecated attributes moved to self.memory_manager.<name>
-    memory_limit = DeprecatedMemoryManagerAttribute()
-    memory_target_fraction = DeprecatedMemoryManagerAttribute()
-    memory_spill_fraction = DeprecatedMemoryManagerAttribute()
-    memory_pause_fraction = DeprecatedMemoryManagerAttribute()
-    memory_monitor = DeprecatedMemoryMonitor()
-
     ###########################
     # State machine accessors #
     ###########################
-
-    # Deprecated attributes moved to self.state.<name>
-    actors = DeprecatedWorkerStateAttribute()
-    available_resources = DeprecatedWorkerStateAttribute()
-    busy_workers = DeprecatedWorkerStateAttribute()
-    comm_nbytes = DeprecatedWorkerStateAttribute()
-    comm_threshold_bytes = DeprecatedWorkerStateAttribute()
-    constrained = DeprecatedWorkerStateAttribute()
-    data_needed_per_worker = DeprecatedWorkerStateAttribute(target="data_needed")
-    executed_count = DeprecatedWorkerStateAttribute()
-    executing_count = DeprecatedWorkerStateAttribute()
-    generation = DeprecatedWorkerStateAttribute()
-    has_what = DeprecatedWorkerStateAttribute()
-    in_flight_tasks = DeprecatedWorkerStateAttribute(target="in_flight_tasks_count")
-    in_flight_workers = DeprecatedWorkerStateAttribute()
-    log = DeprecatedWorkerStateAttribute()
-    long_running = DeprecatedWorkerStateAttribute()
-    nthreads = DeprecatedWorkerStateAttribute()
-    stimulus_log = DeprecatedWorkerStateAttribute()
-    stimulus_story = DeprecatedWorkerStateAttribute()
-    story = DeprecatedWorkerStateAttribute()
-    ready = DeprecatedWorkerStateAttribute()
-    tasks = DeprecatedWorkerStateAttribute()
-    target_message_size = DeprecatedWorkerStateAttribute()
-    total_out_connections = DeprecatedWorkerStateAttribute()
-    total_resources = DeprecatedWorkerStateAttribute()
-    transition_counter = DeprecatedWorkerStateAttribute()
-    transition_counter_max = DeprecatedWorkerStateAttribute()
-    validate = DeprecatedWorkerStateAttribute()
-    validate_task = DeprecatedWorkerStateAttribute()
-    waiting_for_data_count = DeprecatedWorkerStateAttribute()
 
     @property
     def data_needed(self) -> set[TaskState]:

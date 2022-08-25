@@ -21,7 +21,6 @@ import subprocess
 import sys
 import tempfile
 import threading
-import warnings
 import weakref
 from collections import defaultdict
 from collections.abc import Callable
@@ -438,37 +437,6 @@ def run_nanny(q, scheduler_q, config, **kwargs):
         # Scheduler might've failed
         if isinstance(scheduler_addr, str):
             _run_and_close_tornado(_)
-
-
-@contextmanager
-def check_active_rpc(loop, active_rpc_timeout=1):
-    warnings.warn(
-        "check_active_rpc is deprecated - use gen_test()",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    active_before = set(rpc.active)
-    yield
-    # Some streams can take a bit of time to notice their peer
-    # has closed, and keep a coroutine (*) waiting for a CommClosedError
-    # before calling close_rpc() after a CommClosedError.
-    # This would happen especially if a non-localhost address is used,
-    # as Nanny does.
-    # (*) (example: gather_from_workers())
-
-    def fail():
-        pytest.fail(
-            "some RPCs left active by test: %s" % (set(rpc.active) - active_before)
-        )
-
-    async def wait():
-        await async_wait_for(
-            lambda: len(set(rpc.active) - active_before) == 0,
-            timeout=active_rpc_timeout,
-            fail_func=fail,
-        )
-
-    loop.run_sync(wait)
 
 
 @contextlib.asynccontextmanager

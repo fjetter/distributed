@@ -53,11 +53,7 @@ from distributed.utils import (
     silence_logging,
 )
 from distributed.worker import Worker, run
-from distributed.worker_memory import (
-    DeprecatedMemoryManagerAttribute,
-    DeprecatedMemoryMonitor,
-    NannyMemoryManager,
-)
+from distributed.worker_memory import NannyMemoryManager
 
 if TYPE_CHECKING:
     from distributed.diagnostics.plugin import NannyPlugin
@@ -127,7 +123,6 @@ class Nanny(ServerNode):
         scheduler_file=None,
         worker_port: int | str | Collection[int] | None = 0,
         nthreads=None,
-        loop=None,
         local_directory=None,
         services=None,
         name=None,
@@ -154,14 +149,6 @@ class Nanny(ServerNode):
         config=None,
         **worker_kwargs,
     ):
-        if loop is not None:
-            warnings.warn(
-                "the `loop` kwarg to `Nanny` is ignored, and will be removed in a future release. "
-                "The Nanny always binds to the current loop.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         self._setup_logging(logger)
         self.loop = self.io_loop = IOLoop.current()
 
@@ -286,11 +273,6 @@ class Nanny(ServerNode):
 
         self._listen_address = listen_address
         Nanny._instances.add(self)
-
-    # Deprecated attributes; use Nanny.memory_manager.<name> instead
-    memory_limit = DeprecatedMemoryManagerAttribute()
-    memory_terminate_fraction = DeprecatedMemoryManagerAttribute()
-    memory_monitor = DeprecatedMemoryMonitor()
 
     def __repr__(self):
         return "<Nanny: %s, threads: %d>" % (self.worker_address, self.nthreads)

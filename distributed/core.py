@@ -8,7 +8,6 @@ import threading
 import traceback
 import types
 import uuid
-import warnings
 import weakref
 from collections import defaultdict, deque
 from collections.abc import Container, Coroutine
@@ -105,14 +104,6 @@ def _expects_comm(func: Callable) -> bool:
     sig = inspect.signature(func)
     params = list(sig.parameters)
     if params and params[0] == "comm":
-        return True
-    if params and params[0] == "stream":
-        warnings.warn(
-            "Calling the first arugment of a RPC handler `stream` is "
-            "deprecated. Defining this argument is optional. Either remove the "
-            f"arugment or rename it to `comm` in {func}.",
-            FutureWarning,
-        )
         return True
     return False
 
@@ -313,15 +304,7 @@ class Server:
         deserializers=None,
         connection_args=None,
         timeout=None,
-        io_loop=None,
     ):
-        if io_loop is not None:
-            warnings.warn(
-                "The io_loop kwarg to Server is ignored and will be deprecated",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         self._status = Status.init
         self.handlers = {
             "identity": self.identity,
@@ -864,19 +847,12 @@ class Server:
 
             if not self.__stopped:
                 self.__stopped = True
-                _stops = set()
                 for listener in self.listeners:
                     future = listener.stop()
                     if inspect.isawaitable(future):
-                        warnings.warn(
+                        raise TypeError(
                             f"{type(listener)} is using an asynchronous `stop` method. "
-                            "Support for asynchronous `Listener.stop` will be removed in a future version",
-                            PendingDeprecationWarning,
                         )
-                        _stops.add(future)
-                if _stops:
-                    await asyncio.gather(*_stops)
-
             # TODO: Deal with exceptions
             await self._ongoing_background_tasks.stop()
 
@@ -1092,14 +1068,6 @@ class rpc:
         self.status = Status.closed
         return await asyncio.gather(*self.close_comms())
 
-    def __enter__(self):
-        warnings.warn(
-            "the rpc synchronous context manager is deprecated",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self
-
     def __exit__(self, exc_type, exc_value, traceback):
         asyncio.ensure_future(self.close_rpc())
 
@@ -1160,15 +1128,6 @@ class PooledRPCCall:
 
     async def close_rpc(self):
         pass
-
-    # For compatibility with rpc()
-    def __enter__(self):
-        warnings.warn(
-            "the rpc synchronous context manager is deprecated",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return self
 
     def __exit__(self, exc_type, exc_value, traceback):
         pass

@@ -49,7 +49,6 @@ from tornado.ioloop import IOLoop
 
 import dask
 from dask import istask
-from dask.utils import ensure_bytes as _ensure_bytes
 from dask.utils import parse_timedelta as _parse_timedelta
 from dask.widgets import get_template
 
@@ -436,10 +435,8 @@ class LoopRunner:
                 try:
                     asyncio.get_running_loop()
                 except RuntimeError:
-                    warnings.warn(
-                        "Constructing a LoopRunner(asynchronous=True) without a running loop is deprecated",
-                        DeprecationWarning,
-                        stacklevel=2,
+                    raise RuntimeError(
+                        "Constructing a LoopRunner(asynchronous=True) without a running loop is not supported",
                     )
                 self._loop = IOLoop.current()
             else:
@@ -448,10 +445,8 @@ class LoopRunner:
                 self._loop = IOLoop()
         else:
             if not loop.asyncio_loop.is_running():
-                warnings.warn(
-                    "Constructing LoopRunner(loop=loop) without a running loop is deprecated",
-                    DeprecationWarning,
-                    stacklevel=2,
+                raise RuntimeError(
+                    "Constructing a LoopRunner(asynchronous=True) without a running loop is not supported",
                 )
             self._loop = loop
         self._asynchronous = asynchronous
@@ -583,13 +578,6 @@ class LoopRunner:
 
     @property
     def loop(self):
-        loop = self._loop
-        if not loop.asyncio_loop.is_running():
-            warnings.warn(
-                "Accessing the loop property while the loop is not running is deprecated",
-                DeprecationWarning,
-                stacklevel=2,
-            )
         return self._loop
 
 
@@ -1010,44 +998,6 @@ def read_block(f, offset, length, delimiter=None):
     f.seek(offset)
     bytes = f.read(length)
     return bytes
-
-
-def ensure_bytes(s):
-    """Attempt to turn `s` into bytes.
-
-    Parameters
-    ----------
-    s : Any
-        The object to be converted. Will correctly handled
-
-        * str
-        * bytes
-        * objects implementing the buffer protocol (memoryview, ndarray, etc.)
-
-    Returns
-    -------
-    b : bytes
-
-    Raises
-    ------
-    TypeError
-        When `s` cannot be converted
-
-    Examples
-    --------
-    >>> ensure_bytes('123')
-    b'123'
-    >>> ensure_bytes(b'123')
-    b'123'
-    """
-    warnings.warn(
-        "`distributed.utils.ensure_bytes` is deprecated. "
-        "Please switch to `dask.utils.ensure_bytes`. "
-        "This will be removed in `2022.6.0`.",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return _ensure_bytes(s)
 
 
 def ensure_memoryview(obj):
@@ -1548,17 +1498,7 @@ def clean_dashboard_address(addrs: AnyType, default_listen_ip: str = "") -> list
     return addresses
 
 
-_deprecations = {
-    "deserialize_for_cli": "dask.config.deserialize",
-    "serialize_for_cli": "dask.config.serialize",
-    "format_bytes": "dask.utils.format_bytes",
-    "format_time": "dask.utils.format_time",
-    "funcname": "dask.utils.funcname",
-    "parse_bytes": "dask.utils.parse_bytes",
-    "parse_timedelta": "dask.utils.parse_timedelta",
-    "typename": "dask.utils.typename",
-    "tmpfile": "dask.utils.tmpfile",
-}
+_deprecations: dict[str, str] = {}
 
 
 def __getattr__(name):

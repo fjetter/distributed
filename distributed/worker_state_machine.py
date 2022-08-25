@@ -7,7 +7,6 @@ import logging
 import operator
 import random
 import sys
-import warnings
 import weakref
 from collections import defaultdict, deque
 from collections.abc import (
@@ -47,7 +46,6 @@ if TYPE_CHECKING:
 
     # Circular imports
     from distributed.diagnostics.plugin import WorkerPlugin
-    from distributed.worker import Worker
 
     # TODO move out of TYPE_CHECKING (requires Python >=3.10)
     TaskStateState: TypeAlias = Literal[
@@ -3482,32 +3480,3 @@ class BaseWorker(abc.ABC):
     async def retry_busy_worker_later(self, worker: str) -> StateMachineEvent:
         """Wait some time, then take a peer worker out of busy state"""
         ...
-
-
-class DeprecatedWorkerStateAttribute:
-    name: str
-    target: str | None
-
-    def __init__(self, target: str | None = None):
-        self.target = target
-
-    def __set_name__(self, owner: type, name: str) -> None:
-        self.name = name
-
-    def _warn_deprecated(self) -> None:
-        warnings.warn(
-            f"The `Worker.{self.name}` attribute has been moved to "
-            f"`Worker.state.{self.target or self.name}`",
-            FutureWarning,
-        )
-
-    def __get__(self, instance: Worker | None, owner: type[Worker]) -> Any:
-        if instance is None:
-            # This is triggered by Sphinx
-            return None  # pragma: nocover
-        self._warn_deprecated()
-        return getattr(instance.state, self.target or self.name)
-
-    def __set__(self, instance: Worker, value: Any) -> None:
-        self._warn_deprecated()
-        setattr(instance.state, self.target or self.name, value)

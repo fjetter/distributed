@@ -983,32 +983,6 @@ async def test_fetch_to_missing_on_network_failure(c, s, a):
         await wait_for_state("y", "missing", a)
 
 
-@gen_cluster()
-async def test_deprecated_worker_attributes(s, a, b):
-    n = a.state.comm_threshold_bytes
-    msg = (
-        "The `Worker.comm_threshold_bytes` attribute has been moved to "
-        "`Worker.state.comm_threshold_bytes`"
-    )
-    with pytest.warns(FutureWarning, match=msg):
-        assert a.comm_threshold_bytes == n
-    with pytest.warns(FutureWarning, match=msg):
-        a.comm_threshold_bytes += 1
-        assert a.comm_threshold_bytes == n + 1
-    assert a.state.comm_threshold_bytes == n + 1
-
-    # Old and new names differ
-    msg = (
-        "The `Worker.in_flight_tasks` attribute has been moved to "
-        "`Worker.state.in_flight_tasks_count`"
-    )
-    with pytest.warns(FutureWarning, match=msg):
-        assert a.in_flight_tasks == 0
-
-    with pytest.warns(FutureWarning, match="attribute has been removed"):
-        assert a.data_needed == set()
-
-
 @pytest.mark.parametrize(
     "nbytes,n_in_flight",
     [

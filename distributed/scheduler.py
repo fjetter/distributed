@@ -2901,7 +2901,6 @@ class Scheduler(SchedulerState, ServerNode):
 
     def __init__(
         self,
-        loop=None,
         delete_interval="500ms",
         synchronize_worker_interval="60s",
         services=None,
@@ -2928,13 +2927,6 @@ class Scheduler(SchedulerState, ServerNode):
         jupyter=False,
         **kwargs,
     ):
-        if loop is not None:
-            warnings.warn(
-                "the loop kwarg to Scheduler is deprecated",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
         self.loop = self.io_loop = IOLoop.current()
         self._setup_logging(logger)
 
