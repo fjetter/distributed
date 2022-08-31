@@ -39,9 +39,12 @@ jobs:
       - uses: actions/cache@v3
         id: cache
         with:
+          # Suffix is depending on the backend / OS. Let's be agnostic here
+
+          # See https://docs.python.org/3/library/shelve.html#shelve.open
           path: |
-            test_report.db
-            test_report_jobs.db
+            test_report*
+            !test_report.html
           key: ${{ env.PYTHON_VERSION }}-${{ hashFiles('continuous_integration/scripts/test_report*') }}
 
       - name: Generate report
@@ -50,7 +53,6 @@ jobs:
           python continuous_integration/scripts/test_report.py --max-days 7 --max-runs 20 --nfails 2 -o test_short_report.html --title "Test Short Report"
           mkdir deploy
           mv test_report.html test_short_report.html deploy/
-          ls -la
 
       - name: Deploy 🚀
         uses: JamesIves/github-pages-deploy-action@4.1.7
