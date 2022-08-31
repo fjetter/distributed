@@ -419,18 +419,45 @@ class RequireEncryptionMixin:
 _NUMERIC_ONLY = socket.AI_NUMERICHOST | socket.AI_NUMERICSERV
 
 
+def _getaddrinfo_debug(loop, host, port, family, type, proto, flags):
+    # based on https://github.com/python/cpython/blob/63140b445e4a303df430b3d60c1cd4ef34f27c03/Lib/asyncio/base_events.py#L833-L856
+    t0 = loop.time()
+    addrinfo = socket.getaddrinfo(host, port, family, type, proto, flags)
+    dt = loop.time() - t0
+
+    if dt >= loop.slow_callback_duration:
+        msg = [f"{host}:{port!r}"]
+        if family:
+            msg.append(f"family={family!r}")
+        if type:
+            msg.append(f"type={type!r}")
+        if proto:
+            msg.append(f"proto={proto!r}")
+        if flags:
+            msg.append(f"flags={flags!r}")
+        msg = ", ".join(msg)
+        raise RuntimeError(
+            f"Getting address info {msg} took {dt * 1e3:.3f}ms: {addrinfo!r}"
+        )
+    return addrinfo
+
+
 async def _getaddrinfo(host, port, *, family, type=socket.SOCK_STREAM):
+
+    loop = asyncio.get_running_loop()
     # If host and port are numeric, then getaddrinfo doesn't block and we can
     # skip get_running_loop().getaddrinfo which is implemented by running in
     # a ThreadPoolExecutor.
     # So we try first with the _NUMERIC_ONLY flags set, and then only use the
     # threadpool if that fails with EAI_NONAME:
     try:
-        return socket.getaddrinfo(
+        return _getaddrinfo_debug(
+            loop,
             host,
             port,
             family=family,
             type=type,
+            proto=0,
             flags=_NUMERIC_ONLY,
         )
     except socket.gaierror as e:
@@ -438,9 +465,7 @@ async def _getaddrinfo(host, port, *, family, type=socket.SOCK_STREAM):
             raise
 
     # That failed; it's a real hostname. We better use a thread.
-    return await asyncio.get_running_loop().getaddrinfo(
-        host, port, family=family, type=socket.SOCK_STREAM
-    )
+    return await loop.getaddrinfo(host, port, family=family, type=socket.SOCK_STREAM)
 
 
 class _DefaultLoopResolver(netutil.Resolver):
