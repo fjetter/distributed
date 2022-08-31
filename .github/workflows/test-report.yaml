@@ -39,7 +39,9 @@ jobs:
       - uses: actions/cache@v3
         id: cache
         with:
-          path: "*.db"
+          path: |
+            test_report.db
+            test_report_jobs.db
           key: ${{ env.PYTHON_VERSION }}-${{ hashFiles('continuous_integration/scripts/test_report*') }}
 
       - name: Generate report
