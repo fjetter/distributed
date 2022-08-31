@@ -50,6 +50,7 @@ jobs:
           python continuous_integration/scripts/test_report.py --max-days 7 --max-runs 20 --nfails 2 -o test_short_report.html --title "Test Short Report"
           mkdir deploy
           mv test_report.html test_short_report.html deploy/
+          ls -la
 
       - name: Deploy 🚀
         uses: JamesIves/github-pages-deploy-action@4.1.7
