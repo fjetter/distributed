@@ -8,7 +8,6 @@ from math import log2
 from time import time
 from typing import TYPE_CHECKING, ClassVar, TypedDict
 
-from tlz import topk
 from tornado.ioloop import PeriodicCallback
 
 import dask
@@ -420,14 +419,7 @@ class WorkStealing(SchedulerPlugin):
             start = time()
 
             saturated = s.saturated
-            if not saturated:
-                saturated = topk(10, s.workers.values(), key=combined_occupancy)
-                saturated = [
-                    ws
-                    for ws in saturated
-                    if combined_occupancy(ws) > 0.2 and len(ws.processing) > ws.nthreads
-                ]
-            elif len(saturated) < 20:
+            if len(saturated) < 20:
                 saturated = sorted(saturated, key=combined_occupancy, reverse=True)
             if len(idle) < 20:
                 idle = sorted(idle, key=combined_occupancy)
