@@ -1,5 +1,8 @@
 codecov:
   require_ci_to_pass: yes
+  disable_default_path_fixes: true
+fixes:
+  - "/home/runner/work/distributed/::"
 
 coverage:
   precision: 2
@@ -14,7 +17,5 @@ coverage:
     patch:
       default:
         target: 100%
-fixes:
-  - "/home/runner/work/::"
 
 comment: off
