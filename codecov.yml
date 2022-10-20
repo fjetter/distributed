@@ -16,6 +16,6 @@ coverage:
       default:
         target: 100%
 fixes:
-  - "/home/runner/work/distributed::"
+  - "/home/runner/work/distributed/::"
 
 comment: off
