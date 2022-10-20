@@ -14,5 +14,7 @@ coverage:
     patch:
       default:
         target: 100%
+fixes:
+  - "/home/runner/work/distributed/distributed::"
 
 comment: off
