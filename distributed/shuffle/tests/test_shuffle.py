@@ -34,6 +34,7 @@ pa = pytest.importorskip("pyarrow")
 
 def clean_worker(worker):
     """Assert that the worker has no shuffle state"""
+    print("Clean worker...")
     assert not worker.extensions["shuffle"].shuffles
     for dirpath, dirnames, filenames in os.walk(worker.local_directory):
         assert "shuffle" not in dirpath
@@ -120,11 +121,18 @@ async def test_bad_disk(c, s, a, b):
     # clean_scheduler(s)
 
 
-@pytest.mark.skip
-@pytest.mark.slow
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "transfer",
+        # "barrier_same",
+        # "barrier_different",
+        # "unpack",
+    ],
+)
 @gen_cluster(client=True)
-async def test_crashed_worker(c, s, a, b):
-
+async def test_crashed_worker(c, s, a, b, stage):
+    ext = s.extensions["shuffle"]
     df = dask.datasets.timeseries(
         start="2000-01-01",
         end="2000-01-10",
@@ -132,29 +140,92 @@ async def test_crashed_worker(c, s, a, b):
         freq="10 s",
     )
     out = dd.shuffle.shuffle(df, "x", shuffle="p2p")
-    out = out.persist()
+    out = out.size.persist()
+    while not ext.shuffle_ids():
+        await asyncio.sleep(0.1)
 
-    while (
-        len(
-            [
-                ts
-                for ts in s.tasks.values()
-                if "shuffle_transfer" in ts.key and ts.state == "memory"
-            ]
-        )
-        < 3
-    ):
-        await asyncio.sleep(0.01)
-    await b.close()
+    assert len(ext.shuffle_ids()) == 1
+    shuffle_id = list(ext.schemas)[0]
 
-    with pytest.raises(Exception) as e:
+    async def wait_for_tasks_in_state(key_prefix, count, state):
+        while (
+            len(
+                [
+                    ts
+                    for ts in s.tasks.values()
+                    if "shuffle-transfer" in ts.key and ts.state == state
+                ]
+            )
+            < count
+        ):
+            await asyncio.sleep(0.01)
+
+    if stage == "transfer":
+        await wait_for_tasks_in_state("shuffle-transfer", 3, "memory")
+        await b.close()
+    elif stage == "barrier_same":
+        await wait_for_tasks_in_state("barrier", 3, "memory")
+        ts = s.tasks[f"shuffle-barrier-{shuffle_id}"]
+        ws = ts.processing_on
+        if a.address == ws.address:
+            await a.close()
+        else:
+            await b.close()
+    elif stage == "barrier_different":
+        await wait_for_tasks_in_state("barrier", 3, "memory")
+        ts = s.tasks[f"shuffle-barrier-{shuffle_id}"]
+        ws = ts.processing_on
+        if a.address != ws.address:
+            await a.close()
+        else:
+            await b.close()
+    elif stage == "unpack":
+        await wait_for_tasks_in_state("unpack", 3, "memory")
+        await b.close()
+    else:
+        raise RuntimeError(f"Unexpected stage {stage}")
+
+    with pytest.raises(RuntimeError, match=b.address) as e:
         out = await c.compute(out)
 
     assert b.address in str(e.value)
+    # TODO: The extension may need a couple of cycles to clean up
+    await asyncio.sleep(1)
+    clean_worker(a)  # TODO: clean up on exception
+    clean_worker(b)
+    clean_scheduler(s)
 
-    # clean_worker(a)  # TODO: clean up on exception
-    # clean_worker(b)
-    # clean_scheduler(s)
+
+@gen_cluster(client=True)
+async def test_crash_worker_joined_after_start(c, s, a, b):
+    ext = s.extensions["shuffle"]
+    df = dask.datasets.timeseries(
+        start="2000-01-01",
+        end="2000-01-10",
+        dtypes={"x": float, "y": float},
+        freq="10 s",
+    )
+    out = dd.shuffle.shuffle(df, "x", shuffle="p2p")
+    x, y = c.compute([df.x.size, out.x.size])
+    while not ext.shuffle_ids():
+        await asyncio.sleep(0.1)
+
+    async with Worker(s.address) as new_worker:
+        fut = c.submit(lambda: 1, workers=[new_worker.address])
+        await fut
+        await asyncio.sleep(0.1)
+        # This worker did not participate in the shuffle, should not have an impact
+
+        # TODO: Is it possible for a new worker to join and get tranfer tasks
+        # assigned? (I would hope so!)
+        assert len(new_worker.state.tasks) == 1
+    x = await x
+    y = await y
+    assert x == y
+
+    clean_worker(a)
+    clean_worker(b)
+    clean_scheduler(s)
 
 
 @gen_cluster(client=True)
