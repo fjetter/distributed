@@ -3036,14 +3036,21 @@ class SchedulerState:
                 ndeps = len(dts.dependents)
                 weight = min(1, nworkers / ndeps)
                 comm_bytes += nbytes * weight
+        import math
 
-        stack_time = ws.occupancy / ws.nthreads
-        start_time = stack_time + comm_bytes / self.bandwidth
+        def sigmoid(x):
+            return 1 / (1 + math.exp(-x))
+
+        rel_occ = round(sigmoid(ws.occupancy / self.total_occupancy), 2)
+        comm_cost = round(
+            sigmoid(comm_bytes / (self._network_occ_global / len(self.workers))), 2
+        )
+        cost_factor = rel_occ + comm_cost
 
         if ts.actor:
-            return (len(ws.actors), start_time, ws.nbytes)
+            return (len(ws.actors), cost_factor, ws.nbytes)
         else:
-            return (start_time, ws.nbytes)
+            return (cost_factor, ws.nbytes)
 
     def add_replica(self, ts: TaskState, ws: WorkerState) -> None:
         """Note that a worker holds a replica of a task with state='memory'"""
