@@ -971,10 +971,10 @@ async def test_pause_while_spilling(c, s, a):
             return bool, (paused,)
 
     futs = c.map(SlowSpill, range(N_TOTAL))
-    while len(a.data.slow) < (N_PAUSE + 1 if a.state.ready else N_PAUSE):
+
+    while a.status != Status.paused:
         await asyncio.sleep(0.01)
 
-    assert a.status == Status.paused
     # Worker should have become paused after the first `SlowSpill` was evicted, because
     # the spill to disk took longer than the memory monitor interval.
     assert len(a.data.fast) == 0
