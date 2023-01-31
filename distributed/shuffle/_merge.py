@@ -66,7 +66,7 @@ def hash_join_p2p(
     _rhs_meta = rhs._meta_nonempty if len(rhs.columns) else rhs._meta
     meta = _lhs_meta.merge(_rhs_meta, **merge_kwargs)
     merge_name = "hash-join-" + tokenize(lhs, left_on, lhs, right_on, suffixes)
-    join_layer = HashJoinLayer(
+    join_layer = HashJoinP2PLayer(
         name=merge_name,
         name_input_left=lhs._name,
         left_on=left_on,
@@ -130,7 +130,7 @@ def merge_unpack(
     return merge_chunk(left, right, result_meta=result_meta)
 
 
-class HashJoinLayer(Layer):
+class HashJoinP2PLayer(Layer):
     def __init__(
         self,
         name: str,
@@ -223,7 +223,7 @@ class HashJoinLayer(Layer):
         return self._cached_dict
 
     def _cull(self, parts_out):
-        return HashJoinLayer(
+        return HashJoinP2PLayer(
             name=self.name,
             name_input_left=self.name_input_left,
             left_on=self.left_on,
