@@ -17,6 +17,7 @@ pd = pytest.importorskip("pandas")
 
 import dask
 import dask.dataframe as dd
+from dask.dataframe._compat import tm
 from dask.distributed import Event, Nanny, Worker
 from dask.utils import stringify
 
@@ -86,6 +87,49 @@ async def test_basic_integration(c, s, a, b):
     await clean_worker(a)
     await clean_worker(b)
     await clean_scheduler(s)
+
+
+def list_eq(aa, bb):
+    if isinstance(aa, dd.DataFrame):
+        a = aa.compute(scheduler="sync")
+    else:
+        a = aa
+    if isinstance(bb, dd.DataFrame):
+        b = bb.compute(scheduler="sync")
+    else:
+        b = bb
+    tm.assert_index_equal(a.columns, b.columns)
+
+    if isinstance(a, pd.DataFrame):
+        av = a.sort_values(list(a.columns)).values
+        bv = b.sort_values(list(b.columns)).values
+    else:
+        av = a.sort_values().values
+        bv = b.sort_values().values
+
+    dd._compat.assert_numpy_array_equal(av, bv)
+
+
+@gen_cluster(client=True)
+async def test_basic_merge(c, s, a, b):
+    import pandas as pd
+
+    import dask.dataframe as dd
+
+    from distributed.shuffle._merge import hash_join
+
+    how = "inner"
+    A = pd.DataFrame({"x": [1, 2, 3, 4, 5, 6], "y": [1, 1, 2, 2, 3, 4]})
+    a = dd.repartition(A, [0, 4, 5])
+
+    B = pd.DataFrame({"y": [1, 3, 4, 4, 5, 6], "z": [6, 5, 4, 3, 2, 1]})
+    b = dd.repartition(B, [0, 2, 5])
+    joined = hash_join(a, "y", b, "y", how)
+
+    result = await c.compute(joined)
+    expected = pd.merge(A, B, how, "y")
+    list_eq(result, expected)
+    print("hooray!")
 
 
 @gen_cluster(client=True)
