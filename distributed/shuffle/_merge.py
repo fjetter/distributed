@@ -8,8 +8,6 @@ import toolz
 
 from dask.base import tokenize
 from dask.core import keys_in_tasks
-from dask.dataframe.core import Index, new_dd_object
-from dask.dataframe.shuffle import partitioning_index
 from dask.highlevelgraph import HighLevelGraph
 from dask.layers import Layer
 from dask.utils import stringify, stringify_collection_keys
@@ -37,6 +35,8 @@ def hash_join_p2p(
     suffixes=("_x", "_y"),
     indicator=False,
 ):
+    from dask.dataframe.core import Index, new_dd_object
+
     if npartitions is None:
         npartitions = max(lhs.npartitions, rhs.npartitions)
 
@@ -99,6 +99,8 @@ def merge_transfer(
     npartitions: int,
     column: str,
 ):
+    from dask.dataframe.shuffle import partitioning_index
+
     input[_HASH_COLUMN_NAME] = partitioning_index(input[column], npartitions)
     return shuffle_transfer(
         input=input,
