@@ -14,6 +14,7 @@ from dask.highlevelgraph import HighLevelGraph
 from dask.layers import Layer
 from dask.utils import stringify, stringify_collection_keys
 
+from distributed.protocol.serialize import to_serialize
 from distributed.shuffle._shuffle import (
     ShuffleId,
     _get_worker_extension,
@@ -65,13 +66,15 @@ def hash_join_p2p(
     _lhs_meta = lhs._meta_nonempty if len(lhs.columns) else lhs._meta
     _rhs_meta = rhs._meta_nonempty if len(rhs.columns) else rhs._meta
     meta = _lhs_meta.merge(_rhs_meta, **merge_kwargs)
-    merge_name = "hash-join-" + tokenize(lhs, left_on, lhs, right_on, suffixes)
+    merge_name = "hash-join-" + tokenize(lhs, rhs, **merge_kwargs)
     join_layer = HashJoinP2PLayer(
         name=merge_name,
         name_input_left=lhs._name,
         left_on=left_on,
+        n_partitions_left=lhs.npartitions,
         name_input_right=rhs._name,
         right_on=right_on,
+        n_partitions_right=rhs.npartitions,
         meta_output=meta,
         how=how,
         npartitions=npartitions,
@@ -86,6 +89,8 @@ def hash_join_p2p(
 
 hash_join = hash_join_p2p
 
+_HASH_COLUMN_NAME = "__partition"
+
 
 def merge_transfer(
     input: pd.DataFrame,
@@ -94,14 +99,13 @@ def merge_transfer(
     npartitions: int,
     column: str,
 ):
-    hash_column = "__partition"
-    input[hash_column] = partitioning_index(input[column], npartitions)
+    input[_HASH_COLUMN_NAME] = partitioning_index(input[column], npartitions)
     return shuffle_transfer(
         input=input,
         id=id,
         input_partition=input_partition,
         npartitions=npartitions,
-        column=hash_column,
+        column=_HASH_COLUMN_NAME,
     )
 
 
@@ -111,23 +115,34 @@ def merge_unpack(
     output_partition: int,
     barrier_left: int,
     barrier_right: int,
+    how,
+    left_on,
+    right_on,
     result_meta,
+    suffixes,
 ):
-    # FIXME: This is odd. There are similar things happening in dask/dask
-    # layers.py but this works for now
     from dask.dataframe.multi import merge_chunk
 
     from distributed.protocol import deserialize
 
+    # FIXME: This is odd.
     result_meta = deserialize(result_meta.header, result_meta.frames)
     ext = _get_worker_extension()
     left = ext.get_output_partition(
         shuffle_id_left, barrier_left, output_partition
-    ).drop(columns="__partition")
+    ).drop(columns=_HASH_COLUMN_NAME)
     right = ext.get_output_partition(
         shuffle_id_right, barrier_right, output_partition
-    ).drop(columns="__partition")
-    return merge_chunk(left, right, result_meta=result_meta)
+    ).drop(columns=_HASH_COLUMN_NAME)
+    return merge_chunk(
+        left,
+        right,
+        how=how,
+        result_meta=result_meta,
+        left_on=left_on,
+        right_on=right_on,
+        suffixes=suffixes,
+    )
 
 
 class HashJoinP2PLayer(Layer):
@@ -136,6 +151,8 @@ class HashJoinP2PLayer(Layer):
         name: str,
         name_input_left: str,
         left_on,
+        n_partitions_left: int,
+        n_partitions_right: int,
         name_input_right: str,
         right_on,
         meta_output: pd.DataFrame,
@@ -157,6 +174,8 @@ class HashJoinP2PLayer(Layer):
         self.indicator = indicator
         self.meta_output = meta_output
         self.parts_out = parts_out or list(range(npartitions))
+        self.n_partitions_left = n_partitions_left
+        self.n_partitions_right = n_partitions_right
         annotations = annotations or {}
         # TODO: This is more complex
         annotations.update({"shuffle": lambda key: key[-1]})
@@ -169,7 +188,6 @@ class HashJoinP2PLayer(Layer):
         all input partitions. This method does not require graph
         materialization.
         """
-        # FIXME: I believe this is just wrong. For P2PLayer as well
         deps = defaultdict(set)
         parts_out = parts_out or self._keys_to_parts(keys)
         for part in parts_out:
@@ -236,6 +254,8 @@ class HashJoinP2PLayer(Layer):
             meta_output=self.meta_output,
             parts_out=parts_out,
             annotations=self.annotations,
+            n_partitions_left=self.n_partitions_left,
+            n_partitions_right=self.n_partitions_right,
         )
 
     def cull(self, keys, all_keys):
@@ -255,12 +275,18 @@ class HashJoinP2PLayer(Layer):
             return self, culled_deps
 
     def _construct_graph(self) -> dict[tuple | str, tuple]:
-        token_left = tokenize(
-            self.name_input_left, self.left_on, self.npartitions, self.parts_out
+        args = (
+            self.left_on,
+            self.how,
+            self.npartitions,
+            self.n_partitions_left,
+            self.n_partitions_right,
+            self.parts_out,
+            self.suffixes,
+            self.indicator,
         )
-        token_right = tokenize(
-            self.name_input_right, self.right_on, self.npartitions, self.parts_out
-        )
+        token_left = tokenize(self.name_input_left, *args)
+        token_right = tokenize(self.name_input_right, *args)
         dsk: dict[tuple | str, tuple] = {}
         # FIXME: This is a problem. The barrier key is parsed to infer the
         # shuffle ID that is currently used in the transition hook.
@@ -270,7 +296,7 @@ class HashJoinP2PLayer(Layer):
         name_right = "hash-join-transfer-" + token_right
         transfer_keys_left = list()
         transfer_keys_right = list()
-        for i in range(self.npartitions):
+        for i in range(self.n_partitions_left):
             transfer_keys_left.append((name_left, i))
             dsk[(name_left, i)] = (
                 merge_transfer,
@@ -280,6 +306,7 @@ class HashJoinP2PLayer(Layer):
                 self.npartitions,
                 self.left_on,
             )
+        for i in range(self.n_partitions_right):
             transfer_keys_right.append((name_right, i))
             dsk[(name_right, i)] = (
                 merge_transfer,
@@ -304,7 +331,11 @@ class HashJoinP2PLayer(Layer):
                 part_out,
                 _barrier_key_left,
                 _barrier_key_right,
+                self.how,
+                self.left_on,
+                self.right_on,
                 self.meta_output,
+                self.suffixes,
             )
         return dsk
 
@@ -314,6 +345,7 @@ class HashJoinP2PLayer(Layer):
 
         to_list = [
             "left_on",
+            "suffixes",
             "right_on",
         ]
         # msgpack will convert lists into tuples, here
@@ -331,14 +363,15 @@ class HashJoinP2PLayer(Layer):
         }
         keys = layer_dsk.keys() | dsk.keys()
         # TODO: use shuffle-knowledge to calculate dependencies more efficiently
-        deps = {k: keys_in_tasks(keys, [v]) for k, v in layer_dsk.items()}
-
+        deps = {}
+        for k, v in layer_dsk.items():
+            deps[k] = d = keys_in_tasks(keys, [v])
+            assert d
         return {"dsk": toolz.valmap(dumps_task, layer_dsk), "deps": deps}
 
     def __dask_distributed_pack__(
         self, all_hlg_keys, known_key_dependencies, client, client_keys
     ):
-        from distributed.protocol.serialize import to_serialize
 
         return {
             "name": self.name,
@@ -352,4 +385,6 @@ class HashJoinP2PLayer(Layer):
             "suffixes": self.suffixes,
             "indicator": self.indicator,
             "parts_out": self.parts_out,
+            "n_partitions_left": self.n_partitions_left,
+            "n_partitions_right": self.n_partitions_right,
         }
