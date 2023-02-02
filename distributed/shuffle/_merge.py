@@ -2,11 +2,11 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Iterable, Sequence
 
 import toolz
 
-from dask.base import tokenize
+from dask.base import is_dask_collection, tokenize
 from dask.core import keys_in_tasks
 from dask.highlevelgraph import HighLevelGraph
 from dask.layers import Layer
@@ -23,17 +23,58 @@ from distributed.shuffle._shuffle import (
 
 if TYPE_CHECKING:
     import pandas as pd
+    from pandas._typing import IndexLabel, MergeHow, Suffixes
+
+    from dask.dataframe.core import _Frame
+
+
+_HASH_COLUMN_NAME = "__hash_partition"
+
+
+def _prepare_index_for_partitioning(df: pd.DataFrame, index: IndexLabel):
+    import pandas as pd
+
+    from dask.dataframe.core import _Frame
+
+    list_like = pd.api.types.is_list_like(index) and not is_dask_collection(index)
+
+    if not isinstance(index, _Frame):
+        if list_like:
+            # Make sure we don't try to select with pd.Series/pd.Index
+            index = list(index)
+        index = df._select_columns_or_index(index)
+    elif hasattr(index, "to_frame"):
+        # If this is an index, we should still convert to a
+        # DataFrame. Otherwise, the hashed values of a column
+        # selection will not match (important when merging).
+        index = index.to_frame()
+    return index
+
+
+def _calculate_partitions(df: pd.DataFrame, index: IndexLabel, npartitions: int):
+    index = _prepare_index_for_partitioning(df, index)
+    from dask.dataframe.shuffle import partitioning_index
+
+    partitions = index.map_partitions(
+        partitioning_index,
+        npartitions=npartitions or df.npartitions,
+        meta=df._meta._constructor_sliced([0]),
+        transform_divisions=False,
+    )
+    df2 = df.assign(**{_HASH_COLUMN_NAME: partitions})
+    df2._meta.index.name = df._meta.index.name
+    return df2
 
 
 def hash_join_p2p(
-    lhs,
-    left_on,
-    rhs,
-    right_on,
-    how="inner",
-    npartitions=None,
-    suffixes=("_x", "_y"),
-    indicator=False,
+    lhs: _Frame,
+    left_on: IndexLabel | None,
+    rhs: _Frame,
+    right_on: IndexLabel | None,
+    how: MergeHow = "inner",
+    npartitions: int | None = None,
+    suffixes: Suffixes = ("_x", "_y"),
+    indicator: bool = False,
 ):
     from dask.dataframe.core import Index, new_dd_object
 
@@ -66,6 +107,8 @@ def hash_join_p2p(
     _lhs_meta = lhs._meta_nonempty if len(lhs.columns) else lhs._meta
     _rhs_meta = rhs._meta_nonempty if len(rhs.columns) else rhs._meta
     meta = _lhs_meta.merge(_rhs_meta, **merge_kwargs)
+    lhs = _calculate_partitions(lhs, left_on, npartitions)
+    rhs = _calculate_partitions(rhs, right_on, npartitions)
     merge_name = "hash-join-" + tokenize(lhs, rhs, **merge_kwargs)
     join_layer = HashJoinP2PLayer(
         name=merge_name,
@@ -80,6 +123,8 @@ def hash_join_p2p(
         npartitions=npartitions,
         suffixes=suffixes,
         indicator=indicator,
+        left_index=left_index,
+        right_index=right_index,
     )
     graph = HighLevelGraph.from_collections(
         merge_name, join_layer, dependencies=[lhs, rhs]
@@ -89,7 +134,7 @@ def hash_join_p2p(
 
 hash_join = hash_join_p2p
 
-_HASH_COLUMN_NAME = "__partition"
+_HASH_COLUMN_NAME = "__hash_partition"
 
 
 def merge_transfer(
@@ -97,11 +142,7 @@ def merge_transfer(
     id: ShuffleId,
     input_partition: int,
     npartitions: int,
-    column: str,
 ):
-    from dask.dataframe.shuffle import partitioning_index
-
-    input[_HASH_COLUMN_NAME] = partitioning_index(input[column], npartitions)
     return shuffle_transfer(
         input=input,
         id=id,
@@ -117,11 +158,11 @@ def merge_unpack(
     output_partition: int,
     barrier_left: int,
     barrier_right: int,
-    how,
-    left_on,
-    right_on,
-    result_meta,
-    suffixes,
+    how: MergeHow,
+    left_on: IndexLabel,
+    right_on: IndexLabel,
+    result_meta: pd.DataFrame,
+    suffixes: Suffixes,
 ):
     from dask.dataframe.multi import merge_chunk
 
@@ -158,11 +199,13 @@ class HashJoinP2PLayer(Layer):
         name_input_right: str,
         right_on,
         meta_output: pd.DataFrame,
-        how="inner",
-        npartitions=None,
-        suffixes=("_x", "_y"),
-        indicator=False,
-        parts_out=None,
+        left_index: bool,
+        right_index: bool,
+        how: MergeHow = "inner",
+        npartitions: int | None = None,
+        suffixes: Suffixes = ("_x", "_y"),
+        indicator: bool = False,
+        parts_out: Sequence | None = None,
         annotations: dict | None = None,
     ) -> None:
         self.name = name
@@ -178,12 +221,16 @@ class HashJoinP2PLayer(Layer):
         self.parts_out = parts_out or list(range(npartitions))
         self.n_partitions_left = n_partitions_left
         self.n_partitions_right = n_partitions_right
+        self.left_index = left_index
+        self.right_index = right_index
         annotations = annotations or {}
         # TODO: This is more complex
         annotations.update({"shuffle": lambda key: key[-1]})
         super().__init__(annotations=annotations)
 
-    def _cull_dependencies(self, keys, parts_out=None):
+    def _cull_dependencies(
+        self, keys: Iterable[str], parts_out: Iterable[str] | None = None
+    ):
         """Determine the necessary dependencies to produce `keys`.
 
         For a simple shuffle, output partitions always depend on
@@ -201,7 +248,7 @@ class HashJoinP2PLayer(Layer):
             }
         return deps
 
-    def _keys_to_parts(self, keys):
+    def _keys_to_parts(self, keys: Iterable[str]) -> set[str]:
         """Simple utility to convert keys to partition indices."""
         parts = set()
         for key in keys:
@@ -242,7 +289,7 @@ class HashJoinP2PLayer(Layer):
             self._cached_dict = dsk
         return self._cached_dict
 
-    def _cull(self, parts_out):
+    def _cull(self, parts_out: Sequence[str]):
         return HashJoinP2PLayer(
             name=self.name,
             name_input_left=self.name_input_left,
@@ -255,12 +302,14 @@ class HashJoinP2PLayer(Layer):
             indicator=self.indicator,
             meta_output=self.meta_output,
             parts_out=parts_out,
+            left_index=self.left_index,
+            right_index=self.right_index,
             annotations=self.annotations,
             n_partitions_left=self.n_partitions_left,
             n_partitions_right=self.n_partitions_right,
         )
 
-    def cull(self, keys, all_keys):
+    def cull(self, keys: Iterable[str], all_keys: Any) -> tuple[HashJoinP2PLayer, dict]:
         """Cull a SimpleShuffleLayer HighLevelGraph layer.
 
         The underlying graph will only include the necessary
@@ -306,7 +355,6 @@ class HashJoinP2PLayer(Layer):
                 token_left,
                 i,
                 self.npartitions,
-                self.left_on,
             )
         for i in range(self.n_partitions_right):
             transfer_keys_right.append((name_right, i))
@@ -316,7 +364,6 @@ class HashJoinP2PLayer(Layer):
                 token_right,
                 i,
                 self.npartitions,
-                self.right_on,
             )
 
         _barrier_key_left = barrier_key(ShuffleId(token_left))
@@ -342,7 +389,9 @@ class HashJoinP2PLayer(Layer):
         return dsk
 
     @classmethod
-    def __dask_distributed_unpack__(cls, state, dsk, dependecies):
+    def __dask_distributed_unpack__(
+        cls, state: dict, dsk: dict, dependecies: dict
+    ) -> dict:
         from distributed.worker import dumps_task
 
         to_list = [
@@ -372,8 +421,12 @@ class HashJoinP2PLayer(Layer):
         return {"dsk": toolz.valmap(dumps_task, layer_dsk), "deps": deps}
 
     def __dask_distributed_pack__(
-        self, all_hlg_keys, known_key_dependencies, client, client_keys
-    ):
+        self,
+        all_hlg_keys: Any,
+        known_key_dependencies: Any,
+        client: Any,
+        client_keys: Any,
+    ) -> dict:
 
         return {
             "name": self.name,
@@ -389,4 +442,6 @@ class HashJoinP2PLayer(Layer):
             "parts_out": self.parts_out,
             "n_partitions_left": self.n_partitions_left,
             "n_partitions_right": self.n_partitions_right,
+            "left_index": self.left_index,
+            "right_index": self.right_index,
         }

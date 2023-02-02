@@ -81,11 +81,10 @@ async def test_merge(c, s, a, b, how):
     B = pd.DataFrame({"y": [1, 3, 4, 4, 5, 6], "z": [6, 5, 4, 3, 2, 1]})
     b = dd.repartition(B, [0, 2, 5])
 
-    res = await c.compute(
-        dd.merge(
-            a, b, left_index=True, right_index=True, how=how, shuffle=shuffle_method
-        )
+    joined = dd.merge(
+        a, b, left_index=True, right_index=True, how=how, shuffle=shuffle_method
     )
+    res = await c.compute(joined)
     assert_eq(
         res,
         pd.merge(A, B, left_index=True, right_index=True, how=how),
@@ -180,3 +179,173 @@ async def test_merge(c, s, a, b, how):
         ),
         pd.merge(A, B, left_on="x", right_index=True, how=how, suffixes=("1", "2")),
     )
+
+
+@pytest.mark.slow
+@gen_cluster(client=True)
+@pytest.mark.parametrize("how", ["inner", "outer", "left", "right"])
+async def test_merge_by_multiple_columns(c, s, a, b, how):
+    shuffle_method = "p2p"
+    # warnings here from pandas
+    pdf1l = pd.DataFrame(
+        {
+            "a": list("abcdefghij"),
+            "b": list("abcdefghij"),
+            "c": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        },
+        index=list("abcdefghij"),
+    )
+    pdf1r = pd.DataFrame(
+        {
+            "d": list("abcdefghij"),
+            "e": list("abcdefghij"),
+            "f": [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        },
+        index=list("abcdefghij"),
+    )
+
+    pdf2l = pd.DataFrame(
+        {
+            "a": list("abcdeabcde"),
+            "b": list("abcabcabca"),
+            "c": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        },
+        index=list("abcdefghij"),
+    )
+    pdf2r = pd.DataFrame(
+        {
+            "d": list("edcbaedcba"),
+            "e": list("aaabbbcccd"),
+            "f": [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        },
+        index=list("fghijklmno"),
+    )
+
+    pdf3l = pd.DataFrame(
+        {
+            "a": list("aaaaaaaaaa"),
+            "b": list("aaaaaaaaaa"),
+            "c": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+        },
+        index=list("abcdefghij"),
+    )
+    pdf3r = pd.DataFrame(
+        {
+            "d": list("aaabbbccaa"),
+            "e": list("abbbbbbbbb"),
+            "f": [10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+        },
+        index=list("ABCDEFGHIJ"),
+    )
+
+    for pdl, pdr in [(pdf1l, pdf1r), (pdf2l, pdf2r), (pdf3l, pdf3r)]:
+
+        for lpart, rpart in [(2, 2), (3, 2), (2, 3)]:
+
+            ddl = dd.from_pandas(pdl, lpart)
+            ddr = dd.from_pandas(pdr, rpart)
+
+            assert_eq(
+                await c.compute(ddl.join(ddr, how=how, shuffle=shuffle_method)),
+                pdl.join(pdr, how=how),
+            )
+            assert_eq(
+                await c.compute(ddr.join(ddl, how=how, shuffle=shuffle_method)),
+                pdr.join(pdl, how=how),
+            )
+
+            assert_eq(
+                await c.compute(
+                    dd.merge(
+                        ddl,
+                        ddr,
+                        how=how,
+                        left_index=True,
+                        right_index=True,
+                        shuffle=shuffle_method,
+                    )
+                ),
+                pd.merge(pdl, pdr, how=how, left_index=True, right_index=True),
+            )
+            assert_eq(
+                await c.compute(
+                    dd.merge(
+                        ddr,
+                        ddl,
+                        how=how,
+                        left_index=True,
+                        right_index=True,
+                        shuffle=shuffle_method,
+                    )
+                ),
+                pd.merge(pdr, pdl, how=how, left_index=True, right_index=True),
+            )
+
+            # hash join
+            list_eq(
+                await c.compute(
+                    dd.merge(
+                        ddl,
+                        ddr,
+                        how=how,
+                        left_on="a",
+                        right_on="d",
+                        shuffle=shuffle_method,
+                    )
+                ),
+                pd.merge(pdl, pdr, how=how, left_on="a", right_on="d"),
+            )
+            list_eq(
+                await c.compute(
+                    dd.merge(
+                        ddl,
+                        ddr,
+                        how=how,
+                        left_on="b",
+                        right_on="e",
+                        shuffle=shuffle_method,
+                    )
+                ),
+                pd.merge(pdl, pdr, how=how, left_on="b", right_on="e"),
+            )
+
+            list_eq(
+                await c.compute(
+                    dd.merge(
+                        ddr,
+                        ddl,
+                        how=how,
+                        left_on="d",
+                        right_on="a",
+                        shuffle=shuffle_method,
+                    )
+                ),
+                pd.merge(pdr, pdl, how=how, left_on="d", right_on="a"),
+            )
+            list_eq(
+                await c.compute(
+                    dd.merge(
+                        ddr,
+                        ddl,
+                        how=how,
+                        left_on="e",
+                        right_on="b",
+                        shuffle=shuffle_method,
+                    )
+                ),
+                pd.merge(pdr, pdl, how=how, left_on="e", right_on="b"),
+            )
+
+            list_eq(
+                await c.compute(
+                    dd.merge(
+                        ddl,
+                        ddr,
+                        how=how,
+                        left_on=["a", "b"],
+                        right_on=["d", "e"],
+                        shuffle=shuffle_method,
+                    )
+                ),
+                pd.merge(pdl, pdr, how=how, left_on=["a", "b"], right_on=["d", "e"]),
+            )
