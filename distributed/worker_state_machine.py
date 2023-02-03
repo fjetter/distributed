@@ -1267,7 +1267,6 @@ class WorkerState:
     #: Statically-seeded random state, used to guarantee determinism whenever a
     #: pseudo-random choice is required
     rng: random.Random
-    execute_token: dict
 
     __slots__ = tuple(__annotations__)
 
@@ -1333,7 +1332,6 @@ class WorkerState:
         self.transfer_incoming_bytes_limit = transfer_incoming_bytes_limit
         self.actors = {}
         self.rng = random.Random(0)
-        self.execute_token = {}
 
     def handle_stimulus(self, *stims: StateMachineEvent) -> Instructions:
         """Process one or more external events, transition relevant tasks to new states,
@@ -1736,7 +1734,7 @@ class WorkerState:
             return {}, []
 
         recs: Recs = {}
-        while (len(self.executing) + len(self.execute_token)) < self.nthreads:
+        while len(self.executing) < self.nthreads:
             ts = self._next_ready_task()
             if not ts:
                 break
@@ -1753,11 +1751,6 @@ class WorkerState:
 
     def _next_ready_task(self) -> TaskState | None:
         """Pop the top-priority task from self.ready or self.constrained"""
-        if self.execute_token:
-            ts = self.tasks[self.execute_token.pop()]
-            self.ready.discard(ts)
-            self.constrained.discard(ts)
-            return ts
         if self.ready and self.constrained:
             tsr = self.ready.peek()
             tsc = self.constrained.peek()
@@ -2001,10 +1994,6 @@ class WorkerState:
             # The task has already been removed by _ensure_communicating
             for w in ts.who_has:
                 assert ts not in self.data_needed[w]
-
-        for dts in ts.dependents:
-            if all(ddts.state in ("flight", "memory") for ddts in dts.dependencies):
-                self.execute_token[dts.key] = None
 
         ts.done = False
         ts.state = "flight"

@@ -3019,15 +3019,17 @@ class SchedulerState:
             for dts in ts.dependencies
             if ws not in dts.who_has and dts not in ws.needs_what
         )
-        duration = self.get_task_duration(ts)
+        # Comm cost: comm_bytes / bandwith is expected time to transfer
+        # This is the normalized to the duration of the task such that large
+        # transfers for fast tasks is discouraged
 
-        stack_time = ws.occupancy / ws.nthreads
-        start_time = comm_bytes / self.bandwidth / duration
+        comm_duration = comm_bytes / self.bandwidth
+        comm_cost = comm_duration
 
         if ts.actor:
-            return (len(ws.actors), start_time, ws.nbytes)
+            return (len(ws.actors), comm_cost, ws._network_occ, ws.nbytes)
         else:
-            return (start_time, ws.nbytes)
+            return (comm_cost, ws._network_occ, ws.nbytes)
 
     def add_replica(self, ts: TaskState, ws: WorkerState) -> None:
         """Note that a worker holds a replica of a task with state='memory'"""
