@@ -233,7 +233,7 @@ class WorkerMemoryManager:
     async def _maybe_spill(self, worker: Worker, memory: int) -> None:
         if self.memory_spill_fraction is False:
             return
-
+        return
         # SpillBuffer or a duct-type compatible MutableMapping which offers the
         # fast property and evict() methods. Dask-CUDA uses this.
         if not hasattr(self.data, "fast") or not hasattr(self.data, "evict"):

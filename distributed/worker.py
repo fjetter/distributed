@@ -727,6 +727,7 @@ class Worker(BaseWorker, ServerNode):
             "benchmark_memory": self.benchmark_memory,
             "benchmark_network": self.benchmark_network,
             "get_story": self.get_story,
+            "freeze": self.freeze,
         }
 
         stream_handlers = {
@@ -762,6 +763,7 @@ class Worker(BaseWorker, ServerNode):
         transfer_incoming_bytes_fraction = dask.config.get(
             "distributed.worker.memory.transfer"
         )
+
         if (
             self.memory_manager.memory_limit is not None
             and transfer_incoming_bytes_fraction is not False
@@ -769,6 +771,8 @@ class Worker(BaseWorker, ServerNode):
             transfer_incoming_bytes_limit = int(
                 self.memory_manager.memory_limit * transfer_incoming_bytes_fraction
             )
+
+        # transfer_incoming_bytes_limit = parse_bytes("100MiB")
         state = WorkerState(
             nthreads=nthreads,
             data=self.memory_manager.data,
@@ -948,6 +952,10 @@ class Worker(BaseWorker, ServerNode):
             f"comm: {self.state.in_flight_tasks_count}, "
             f"waiting: {len(self.state.waiting)}>"
         )
+
+    async def freeze(self):
+        self.periodic_callbacks["memory_monitor"].stop()
+        self.status = Status.paused
 
     @property
     def logs(self):
@@ -1717,6 +1725,7 @@ class Worker(BaseWorker, ServerNode):
         if (
             max_connections is not False
             and self.transfer_outgoing_count >= max_connections
+            or self.state.transfer_incoming_bytes_limit < self.transfer_outgoing_bytes
         ):
             logger.debug(
                 "Worker %s has too many open connections to respond to data request "
@@ -1958,7 +1967,7 @@ class Worker(BaseWorker, ServerNode):
 
     def _get_cause(self, keys: Iterable[str]) -> TaskState:
         """For diagnostics, we want to attach a transfer to a single task. This task is
-        typically the next to be executed but since we're fetching tasks for potentially
+        typically the next to be d but since we're fetching tasks for potentially
         many dependents, an exact match is not possible. Additionally, if a key was
         fetched through acquire-replicas, dependents may not be known at all.
 

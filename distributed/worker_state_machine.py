@@ -258,6 +258,7 @@ class TaskState:
     duration: float | None = None
     #: The priority this task given by the scheduler. Determines run order.
     priority: tuple[int, ...] | None = None
+    priority_scheduler: tuple[int, ...] | None = None
     #: Addresses of workers that we believe have this data
     who_has: set[str] = field(default_factory=set)
     #: The worker that current task data is coming from if task is in flight
@@ -358,8 +359,14 @@ class TaskState:
 class Instruction:
     """Command from the worker state machine to the Worker, in response to an event"""
 
-    __slots__ = ("stimulus_id",)
+    __slots__ = ("stimulus_id", "handled")
     stimulus_id: str
+
+    def __new__(cls, *args: Any, **kwargs: Any) -> Instruction:
+        """Hack to initialize the ``handled`` attribute in Python <3.10"""
+        self = object.__new__(cls)
+        self.handled = None
+        return self
 
     @classmethod
     def match(cls, **kwargs: Any) -> _InstructionMatch:
@@ -1260,6 +1267,7 @@ class WorkerState:
     #: Statically-seeded random state, used to guarantee determinism whenever a
     #: pseudo-random choice is required
     rng: random.Random
+    execute_token: dict
 
     __slots__ = tuple(__annotations__)
 
@@ -1325,6 +1333,7 @@ class WorkerState:
         self.transfer_incoming_bytes_limit = transfer_incoming_bytes_limit
         self.actors = {}
         self.rng = random.Random(0)
+        self.execute_token = {}
 
     def handle_stimulus(self, *stims: StateMachineEvent) -> Instructions:
         """Process one or more external events, transition relevant tasks to new states,
@@ -1416,6 +1425,8 @@ class WorkerState:
             self.tasks[key] = ts = TaskState(key)
         if not ts.priority:
             assert priority
+            ts.priority = priority
+        elif priority < ts.priority:
             ts.priority = priority
 
         self.log.append((key, "ensure-task-exists", ts.state, stimulus_id, time()))
@@ -1725,7 +1736,7 @@ class WorkerState:
             return {}, []
 
         recs: Recs = {}
-        while len(self.executing) < self.nthreads:
+        while (len(self.executing) + len(self.execute_token)) < self.nthreads:
             ts = self._next_ready_task()
             if not ts:
                 break
@@ -1742,6 +1753,11 @@ class WorkerState:
 
     def _next_ready_task(self) -> TaskState | None:
         """Pop the top-priority task from self.ready or self.constrained"""
+        if self.execute_token:
+            ts = self.tasks[self.execute_token.pop()]
+            self.ready.discard(ts)
+            self.constrained.discard(ts)
+            return ts
         if self.ready and self.constrained:
             tsr = self.ready.peek()
             tsc = self.constrained.peek()
@@ -1985,6 +2001,10 @@ class WorkerState:
             # The task has already been removed by _ensure_communicating
             for w in ts.who_has:
                 assert ts not in self.data_needed[w]
+
+        for dts in ts.dependents:
+            if all(ddts.state in ("flight", "memory") for ddts in dts.dependencies):
+                self.execute_token[dts.key] = None
 
         ts.done = False
         ts.state = "flight"
@@ -2877,6 +2897,7 @@ class WorkerState:
             ts.exception_text = ""
             ts.traceback_text = ""
             ts.priority = priority
+            ts.priority_scheduler = priority
             ts.duration = ev.duration
             ts.annotations = ev.annotations
 
@@ -3601,6 +3622,7 @@ class BaseWorker(abc.ABC):
 
     def __init__(self, state: WorkerState):
         self.state = state
+        self.instruction_log = list()
         self._async_instructions = set()
 
     def _handle_stimulus_from_task(self, task: asyncio.Task[StateMachineEvent]) -> None:
@@ -3628,6 +3650,8 @@ class BaseWorker(abc.ABC):
         instructions = self.state.handle_stimulus(*stims)
 
         for inst in instructions:
+            inst.handled = time()
+            self.instruction_log.append(inst)
             task: asyncio.Task | None = None
 
             if isinstance(inst, SendMessageToScheduler):
