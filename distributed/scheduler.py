@@ -1026,14 +1026,6 @@ class TaskGroup:
     #: The result types of this TaskGroup
     types: set[str]
 
-    #: The worker most recently assigned a task from this group, or None when the group
-    #: is not identified to be root-like by `SchedulerState.decide_worker`.
-    last_worker: WorkerState | None
-
-    #: If `last_worker` is not None, the number of times that worker should be assigned
-    #: subsequent tasks until a new worker is chosen.
-    last_worker_tasks_left: int
-
     prefix: TaskPrefix | None
     start: float
     stop: float
@@ -1052,8 +1044,6 @@ class TaskGroup:
         self.start = 0.0
         self.stop = 0.0
         self.all_durations = defaultdict(float)
-        self.last_worker = None
-        self.last_worker_tasks_left = 0
 
     def add_duration(self, action: str, start: float, stop: float) -> None:
         duration = stop - start
@@ -1573,7 +1563,8 @@ class SchedulerState:
     #: This is meant for debugging only, to catch infinite recursion loops.
     #: In production, it should always be set to False.
     transition_counter_max: int | Literal[False]
-
+    last_root_worker: WorkerState | None
+    last_root_worker_tasks_left: int
     _task_prefix_count_global: defaultdict[str, int]
     _network_occ_global: float
     ######################
@@ -1639,6 +1630,8 @@ class SchedulerState:
         self.task_metadata = {}
         self.total_nthreads = 0
         self.unknown_durations = {}
+        self.last_root_worker: WorkerState | None = None
+        self.last_root_worker_tasks_left: int = 0
         self.queued = queued
         self.unrunnable = unrunnable
         self.validate = validate
@@ -2044,29 +2037,30 @@ class SchedulerState:
         pool = self.idle.values() if self.idle else self.running
         if not pool:
             return None
-
-        tg = ts.group
-        lws = tg.last_worker
+        lws = self.last_root_worker
         if (
             lws
-            and tg.last_worker_tasks_left
+            and self.last_root_worker_tasks_left
             and lws.status == Status.running
             and self.workers.get(lws.address) is lws
         ):
             ws = lws
         else:
-            # Last-used worker is full, unknown, retiring, or paused;
-            # pick a new worker for the next few tasks
-            ws = min(pool, key=partial(self.worker_objective, ts))
-            tg.last_worker_tasks_left = math.floor(
-                (len(tg) / self.total_nthreads) * ws.nthreads
+            # Last-used worker is full or unknown; pick a new worker for the next few tasks
+            ws = self.last_root_worker = min(
+                pool, key=lambda ws: len(ws.processing) / ws.nthreads
+            )
+            # TODO this should be factored out, possibly cached
+            root_size = 0
+            for tgg in self.task_groups.values():
+                if self.is_rootish_tg(tgg):
+                    root_size += len(tgg)
+            # TODO better batching metric (`len(tg)` is not necessarily the total number of root tasks!)
+            self.last_root_worker_tasks_left = math.ceil(
+                (root_size / self.total_nthreads) * ws.nthreads
             )
 
-        # Record `last_worker`, or clear it on the final task
-        tg.last_worker = (
-            ws if tg.states["released"] + tg.states["waiting"] > 1 else None
-        )
-        tg.last_worker_tasks_left -= 1
+        self.last_root_worker_tasks_left -= 1
 
         if self.validate and ws is not None:
             assert self.workers.get(ws.address) is ws
@@ -2812,6 +2806,13 @@ class SchedulerState:
     # Assigning Tasks to Workers #
     ##############################
 
+    def is_rootish_tg(self, tg):
+        return (
+            len(tg) > self.total_nthreads * 2
+            and len(tg.dependencies) < 5
+            and sum(map(len, tg.dependencies)) < 5
+        )
+
     def is_rootish(self, ts: TaskState) -> bool:
         """
         Whether ``ts`` is a root or root-like task.
@@ -2819,6 +2820,8 @@ class SchedulerState:
         Root-ish tasks are part of a group that's much larger than the cluster,
         and have few or no dependencies.
         """
+        if not ts.dependencies:
+            return True
         if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
             return False
         tg = ts.group
@@ -3023,13 +3026,10 @@ class SchedulerState:
         # This is the normalized to the duration of the task such that large
         # transfers for fast tasks is discouraged
 
-        comm_duration = comm_bytes / self.bandwidth
-        comm_cost = comm_duration
-
         if ts.actor:
-            return (len(ws.actors), comm_cost, ws._network_occ, ws.nbytes)
+            return (len(ws.actors), comm_bytes, ws._network_occ, ws.nbytes)
         else:
-            return (comm_cost, ws._network_occ, ws.nbytes)
+            return (comm_bytes, ws._network_occ, ws.nbytes)
 
     def add_replica(self, ts: TaskState, ws: WorkerState) -> None:
         """Note that a worker holds a replica of a task with state='memory'"""

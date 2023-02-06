@@ -772,7 +772,7 @@ class Worker(BaseWorker, ServerNode):
                 self.memory_manager.memory_limit * transfer_incoming_bytes_fraction
             )
 
-        # transfer_incoming_bytes_limit = parse_bytes("100MiB")
+        transfer_incoming_bytes_limit = parse_bytes("100MiB")
         state = WorkerState(
             nthreads=nthreads,
             data=self.memory_manager.data,
