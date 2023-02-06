@@ -2034,7 +2034,7 @@ class SchedulerState:
             # See root-ish-ness note below in `decide_worker_rootish_queuing_enabled`
             assert math.isinf(self.WORKER_SATURATION)
 
-        pool = self.idle.values() if self.idle else self.running
+        pool = self.idle_task_count if self.idle_task_count else self.running
         if not pool:
             return None
         lws = self.last_root_worker
@@ -2057,7 +2057,7 @@ class SchedulerState:
                     root_size += len(tgg)
             # TODO better batching metric (`len(tg)` is not necessarily the total number of root tasks!)
             self.last_root_worker_tasks_left = math.ceil(
-                (root_size / self.total_nthreads) * ws.nthreads
+                (len(ts.group) / self.total_nthreads) * ws.nthreads
             )
 
         self.last_root_worker_tasks_left -= 1
@@ -2820,8 +2820,6 @@ class SchedulerState:
         Root-ish tasks are part of a group that's much larger than the cluster,
         and have few or no dependencies.
         """
-        if not ts.dependencies:
-            return True
         if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
             return False
         tg = ts.group
