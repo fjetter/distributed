@@ -1775,6 +1775,8 @@ class SchedulerState:
         for prefix_name, count in task_prefix_count.items():
             # TODO: Deal with unknown tasks better
             prefix = self.task_prefixes[prefix_name]
+            if any(self.is_rootish_tg(tg) for tg in prefix.groups):
+                continue
             assert prefix is not None
             duration = prefix.duration_average
             if duration < 0:
@@ -1783,7 +1785,7 @@ class SchedulerState:
                 else:
                     duration = self.UNKNOWN_TASK_DURATION
             res += duration * count
-        occ = res + network_occ / self.bandwidth
+        occ = res #+ network_occ / self.bandwidth
         assert occ >= 0, occ
         return occ
 
@@ -2057,7 +2059,10 @@ class SchedulerState:
                     root_size += len(tgg)
             # TODO better batching metric (`len(tg)` is not necessarily the total number of root tasks!)
             self.last_root_worker_tasks_left = math.ceil(
-                (len(ts.group) / self.total_nthreads) * ws.nthreads
+                (root_size / self.total_nthreads) * ws.nthreads
+            )
+            logger.info(
+                f"Root task size: {self.last_root_worker_tasks_left=} {root_size=} {len(ts.group)=}"
             )
 
         self.last_root_worker_tasks_left -= 1
@@ -2157,6 +2162,7 @@ class SchedulerState:
                 valid_workers,
                 partial(self.worker_objective, ts),
             )
+            # logger.critical(f"Chose worker {ws} for {ts} {ws in self.saturated}")
         else:
             # TODO if `is_rootish` would always return True for tasks without
             # dependencies, we could remove all this logic. The rootish assignment logic
@@ -3015,19 +3021,39 @@ class SchedulerState:
 
         Minimize expected start time.  If a tie then break with data storage.
         """
-        comm_bytes = sum(
-            dts.get_nbytes()
-            for dts in ts.dependencies
-            if ws not in dts.who_has and dts not in ws.needs_what
-        )
+        total_to_fetch = 0
+        additional_fetch = 0
+        for dts in ts.dependencies:
+            nbytes = 0
+            if ws not in dts.who_has:
+                nbytes = dts.get_nbytes()
+                total_to_fetch += nbytes
+                if dts not in ws.needs_what:
+                    additional_fetch += dts.get_nbytes()
+
+        assert total_to_fetch >= additional_fetch
+        start_time = ws.occupancy + additional_fetch / self.bandwidth
         # Comm cost: comm_bytes / bandwith is expected time to transfer
         # This is the normalized to the duration of the task such that large
         # transfers for fast tasks is discouraged
 
         if ts.actor:
-            return (len(ws.actors), comm_bytes, ws._network_occ, ws.nbytes)
+            return (
+                len(ws.actors),
+                total_to_fetch,
+                additional_fetch,
+                ws.occupancy,
+                ws._network_occ,
+                ws.nbytes,
+            )
         else:
-            return (comm_bytes, ws._network_occ, ws.nbytes)
+            return (
+                # start_time,
+                total_to_fetch,
+                additional_fetch,
+                ws._network_occ,
+                ws.nbytes,
+            )
 
     def add_replica(self, ts: TaskState, ws: WorkerState) -> None:
         """Note that a worker holds a replica of a task with state='memory'"""
@@ -4586,8 +4612,6 @@ class Scheduler(SchedulerState, ServerNode):
 
         end = time()
         self.digest_metric("update-graph-duration", end - start)
-
-        # TODO: balance workers
 
     def stimulus_queue_slots_maybe_opened(self, *, stimulus_id: str) -> None:
         """Respond to an event which may have opened spots on worker threadpools
@@ -7913,10 +7937,10 @@ def decide_worker(
     *objective* function.
     """
     assert all(dts.who_has for dts in ts.dependencies)
-    if ts.actor:
-        candidates = set(all_workers)
-    else:
-        candidates = {wws for dts in ts.dependencies for wws in dts.who_has}
+    candidates = set(all_workers)
+    # if ts.actor:
+    # else:
+    #     candidates = {wws for dts in ts.dependencies for wws in dts.who_has}
     if valid_workers is None:
         if not candidates:
             candidates = set(all_workers)

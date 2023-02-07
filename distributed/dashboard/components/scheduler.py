@@ -724,7 +724,6 @@ class WorkersTransferBytes(DashboardComponent):
             x_limit = max(
                 max(transfer_incoming_bytes),
                 max(transfer_outgoing_bytes),
-                max(ws.memory_limit for ws in wss),
             )
         else:
             x_limit = 0

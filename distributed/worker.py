@@ -1706,37 +1706,37 @@ class Worker(BaseWorker, ServerNode):
         if max_connections is None:
             max_connections = self.transfer_outgoing_count_limit
 
-        # Allow same-host connections more liberally
-        if (
-            max_connections
-            and comm
-            and get_address_host(comm.peer_address) == get_address_host(self.address)
-        ):
-            max_connections = max_connections * 2
+        # # Allow same-host connections more liberally
+        # if (
+        #     max_connections
+        #     and comm
+        #     and get_address_host(comm.peer_address) == get_address_host(self.address)
+        # ):
+        #     max_connections = max_connections * 2
 
-        if self.status == Status.paused:
-            max_connections = 1
-            throttle_msg = (
-                " Throttling outgoing data transfers because worker is paused."
-            )
-        else:
-            throttle_msg = ""
+        # if self.status == Status.paused:
+        #     max_connections = 1
+        #     throttle_msg = (
+        #         " Throttling outgoing data transfers because worker is paused."
+        #     )
+        # else:
+        #     throttle_msg = ""
 
-        if (
-            max_connections is not False
-            and self.transfer_outgoing_count >= max_connections
-            or self.state.transfer_incoming_bytes_limit < self.transfer_outgoing_bytes
-        ):
-            logger.debug(
-                "Worker %s has too many open connections to respond to data request "
-                "from %s (%d/%d).%s",
-                self.address,
-                who,
-                self.transfer_outgoing_count,
-                max_connections,
-                throttle_msg,
-            )
-            return {"status": "busy"}
+        # if (
+        #     max_connections is not False
+        #     and self.transfer_outgoing_count >= max_connections
+        #     or self.state.transfer_incoming_bytes_limit < self.transfer_outgoing_bytes
+        # ):
+        #     logger.debug(
+        #         "Worker %s has too many open connections to respond to data request "
+        #         "from %s (%d/%d).%s",
+        #         self.address,
+        #         who,
+        #         self.transfer_outgoing_count,
+        #         max_connections,
+        #         throttle_msg,
+        #     )
+        #     return {"status": "busy"}
 
         self.transfer_outgoing_count += 1
         self.transfer_outgoing_count_total += 1
@@ -2054,6 +2054,7 @@ class Worker(BaseWorker, ServerNode):
                 RuntimeError("Worker is shutting down"),
                 worker=worker,
                 total_nbytes=total_nbytes,
+                requested_keys=to_gather,
                 stimulus_id=f"worker-closing-{time()}",
             )
 
@@ -2074,6 +2075,7 @@ class Worker(BaseWorker, ServerNode):
                 )
                 return GatherDepBusyEvent(
                     worker=worker,
+                    requested_keys=to_gather,
                     total_nbytes=total_nbytes,
                     stimulus_id=f"gather-dep-busy-{time()}",
                 )
@@ -2093,6 +2095,7 @@ class Worker(BaseWorker, ServerNode):
             return GatherDepSuccessEvent(
                 worker=worker,
                 total_nbytes=total_nbytes,
+                requested_keys=to_gather,
                 data=response["data"],
                 stimulus_id=f"gather-dep-success-{time()}",
             )
@@ -2104,6 +2107,7 @@ class Worker(BaseWorker, ServerNode):
             )
             return GatherDepNetworkFailureEvent(
                 worker=worker,
+                requested_keys=to_gather,
                 total_nbytes=total_nbytes,
                 stimulus_id=f"gather-dep-network-failure-{time()}",
             )
@@ -2119,6 +2123,7 @@ class Worker(BaseWorker, ServerNode):
             return GatherDepFailureEvent.from_exception(
                 e,
                 worker=worker,
+                requested_keys=to_gather,
                 total_nbytes=total_nbytes,
                 stimulus_id=f"gather-dep-failure-{time()}",
             )

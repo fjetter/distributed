@@ -667,9 +667,10 @@ class RetryBusyWorkerEvent(StateMachineEvent):
 class GatherDepDoneEvent(StateMachineEvent):
     """:class:`GatherDep` instruction terminated (abstract base class)"""
 
-    __slots__ = ("worker", "total_nbytes")
+    __slots__ = ("worker", "total_nbytes", "requested_keys")
     worker: str
     total_nbytes: int  # Must be the same as in GatherDep instruction
+    requested_keys: set
 
 
 @dataclass
@@ -733,11 +734,13 @@ class GatherDepFailureEvent(GatherDepDoneEvent):
         *,
         worker: str,
         total_nbytes: int,
+        requested_keys: set,
         stimulus_id: str,
     ) -> GatherDepFailureEvent:
         msg = error_message(err)
         return cls(
             worker=worker,
+            requested_keys=requested_keys,
             total_nbytes=total_nbytes,
             exception=msg["exception"],
             traceback=msg["traceback"],
@@ -1595,7 +1598,7 @@ class WorkerState:
                 )
             )
 
-            self.in_flight_workers[worker] = to_gather_keys
+            # self.in_flight_workers[worker] = to_gather_keys
             self.transfer_incoming_count_total += 1
             self.transfer_incoming_bytes += message_nbytes
             if self._should_throttle_incoming_transfers():
@@ -1636,8 +1639,8 @@ class WorkerState:
             if not tasks:
                 del self.data_needed[worker]
                 continue
-            if worker in self.in_flight_workers or worker in self.busy_workers:
-                continue
+            # if worker in self.in_flight_workers or worker in self.busy_workers:
+            #     continue
             heap.append(
                 (
                     tasks.peek().priority,
@@ -2940,8 +2943,7 @@ class WorkerState:
         _execute_done_common
         """
         self.transfer_incoming_bytes -= ev.total_nbytes
-        keys = self.in_flight_workers.pop(ev.worker)
-        for key in keys:
+        for key in ev.requested_keys:
             ts = self.tasks[key]
             ts.done = True
             ts.coming_from = None
@@ -3264,7 +3266,7 @@ class WorkerState:
             "has_what": dict(self.has_what),
             "long_running": {ts.key for ts in self.long_running},
             "in_flight_tasks": {ts.key for ts in self.in_flight_tasks},
-            "in_flight_workers": self.in_flight_workers,
+            # "in_flight_workers": self.in_flight_workers,
             "missing_dep_flight": [ts.key for ts in self.missing_dep_flight],
             "busy_workers": self.busy_workers,
             "log": self.log,
@@ -3396,8 +3398,8 @@ class WorkerState:
             assert dep not in self.ready
             assert dep not in self.constrained
         assert ts.coming_from
-        assert ts.coming_from in self.in_flight_workers
-        assert ts.key in self.in_flight_workers[ts.coming_from]
+        # assert ts.coming_from in self.in_flight_workers
+        # assert ts.key in self.in_flight_workers[ts.coming_from]
 
     def _validate_task_fetch(self, ts: TaskState) -> None:
         assert ts.key not in self.data

@@ -188,12 +188,14 @@ class MemorySamplerExtension:
         self.scheduler.extensions["memory_sampler"] = self
         self.scheduler.handlers["memory_sampler_start"] = self.start
         self.scheduler.handlers["memory_sampler_stop"] = self.stop
+        self.starttime = None
         self.samples = {}
 
     def start(self, client: str, measure: str, interval: float) -> str:
         """Start periodically sampling memory"""
         assert not measure.startswith("_")
         assert isinstance(getattr(self.scheduler.memory, measure), int)
+        self.starttime = datetime.now().timestamp()
 
         key = str(uuid.uuid4())
         self.samples[key] = []
@@ -202,7 +204,7 @@ class MemorySamplerExtension:
             if client in self.scheduler.clients:
                 ts = datetime.now().timestamp()
                 nbytes = getattr(self.scheduler.memory, measure)
-                self.samples[key].append((ts, nbytes))
+                self.samples[key].append((ts - self.starttime, nbytes))
             else:
                 self.stop(key)
 
