@@ -3048,7 +3048,7 @@ class SchedulerState:
             )
         else:
             return (
-                # start_time,
+                start_time,
                 total_to_fetch,
                 additional_fetch,
                 ws._network_occ,
