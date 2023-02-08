@@ -811,6 +811,11 @@ class WorkerState:
         return self._occupancy_cache or self.scheduler._calc_occupancy(
             self.task_prefix_count, self._network_occ
         )
+    @property
+    def occupancy_wout_roots(self) -> float:
+        return self._occupancy_cache or self.scheduler._calc_occupancy_wout_roots(
+            self.task_prefix_count, self._network_occ
+        )
 
 
 @dataclasses.dataclass
@@ -1775,6 +1780,29 @@ class SchedulerState:
         for prefix_name, count in task_prefix_count.items():
             # TODO: Deal with unknown tasks better
             prefix = self.task_prefixes[prefix_name]
+            # if any(self.is_rootish_tg(tg) for tg in prefix.groups):
+            #     continue
+            assert prefix is not None
+            duration = prefix.duration_average
+            if duration < 0:
+                if prefix.max_exec_time > 0:
+                    duration = 2 * prefix.max_exec_time
+                else:
+                    duration = self.UNKNOWN_TASK_DURATION
+            res += duration * count
+        occ = res + network_occ / self.bandwidth
+        assert occ >= 0, occ
+        return occ
+
+    def _calc_occupancy_wout_roots(
+        self,
+        task_prefix_count: dict[str, int],
+        network_occ: float,
+    ) -> float:
+        res = 0.0
+        for prefix_name, count in task_prefix_count.items():
+            # TODO: Deal with unknown tasks better
+            prefix = self.task_prefixes[prefix_name]
             if any(self.is_rootish_tg(tg) for tg in prefix.groups):
                 continue
             assert prefix is not None
@@ -1785,7 +1813,7 @@ class SchedulerState:
                 else:
                     duration = self.UNKNOWN_TASK_DURATION
             res += duration * count
-        occ = res #+ network_occ / self.bandwidth
+        occ = res + network_occ / self.bandwidth
         assert occ >= 0, occ
         return occ
 
@@ -2162,6 +2190,7 @@ class SchedulerState:
                 valid_workers,
                 partial(self.worker_objective, ts),
             )
+            # self.worker_objective(ts, ws, log=True)
             # logger.critical(f"Chose worker {ws} for {ts} {ws in self.saturated}")
         else:
             # TODO if `is_rootish` would always return True for tasks without
@@ -3016,42 +3045,82 @@ class SchedulerState:
             assert isinstance(host, str)
             return host
 
-    def worker_objective(self, ts: TaskState, ws: WorkerState) -> tuple:
+    def worker_objective(self, ts: TaskState, ws: WorkerState, log=False) -> tuple:
         """Objective function to determine which worker should get the task
 
         Minimize expected start time.  If a tie then break with data storage.
         """
         total_to_fetch = 0
         additional_fetch = 0
+        weighted_fetch = 0.0
+        network_occ_combined_min = ws._network_occ
+        network_occ_combined_max = ws._network_occ
         for dts in ts.dependencies:
             nbytes = 0
             if ws not in dts.who_has:
                 nbytes = dts.get_nbytes()
                 total_to_fetch += nbytes
                 if dts not in ws.needs_what:
+                    weight = 1
+                    if dts.dependents:
+                        weight = len(dts.dependents)
+                    weighted_fetch += dts.get_nbytes() / weight
                     additional_fetch += dts.get_nbytes()
+                    network_occ_combined_min += min(
+                        wws._network_occ
+                        for wws in dts.who_has
+                    )
+                    network_occ_combined_max += max(
+                        wws._network_occ
+                        for wws in dts.who_has
+                    )
 
-        assert total_to_fetch >= additional_fetch
-        start_time = ws.occupancy + additional_fetch / self.bandwidth
+        # assert total_to_fetch >= weighted_fetch
+        start_time = ws.occupancy + total_to_fetch / self.bandwidth
+        start_time_weighted = ws.occupancy + weighted_fetch / self.bandwidth
+        start_time_no_roots = ws.occupancy + total_to_fetch / self.bandwidth
+        start_time_weighted_no_roots = ws.occupancy + weighted_fetch / self.bandwidth
         # Comm cost: comm_bytes / bandwith is expected time to transfer
         # This is the normalized to the duration of the task such that large
         # transfers for fast tasks is discouraged
-
+        import random
+        metrics = {
+            "is_saturated": ts in self.saturated,
+            "ndependencies": len(ts.dependencies),
+            "weighted_fetch": weighted_fetch,
+            "total_to_fetch": total_to_fetch,
+            "occupancy": ws.occupancy,
+            "network_occ": ws._network_occ,
+            "network_occ_combined_max": network_occ_combined_max,
+            "occupancy_no_roots": ws.occupancy_wout_roots,
+            "nbytes": ws.nbytes,
+            "additional_fetch": additional_fetch,
+            "start_time": start_time,
+            "start_time_no_roots": start_time_no_roots,
+            "start_time_weighted_no_roots": start_time_weighted_no_roots,
+            "start_time_weighted": start_time_weighted,
+            "random": random.random(),
+        }
+        import dask
+        objective = dask.config.get("distributed.scheduler.objective")
+        return tuple(
+            metrics[obj]
+            for obj in objective
+        )
         if ts.actor:
             return (
                 len(ws.actors),
+                weighted_fetch,
                 total_to_fetch,
-                additional_fetch,
                 ws.occupancy,
                 ws._network_occ,
                 ws.nbytes,
             )
         else:
             return (
-                start_time,
-                total_to_fetch,
                 additional_fetch,
                 ws._network_occ,
+                total_to_fetch,
                 ws.nbytes,
             )
 
@@ -7937,10 +8006,11 @@ def decide_worker(
     *objective* function.
     """
     assert all(dts.who_has for dts in ts.dependencies)
-    candidates = set(all_workers)
-    # if ts.actor:
-    # else:
-    #     candidates = {wws for dts in ts.dependencies for wws in dts.who_has}
+
+    if ts.actor:
+        candidates = set(all_workers)
+    else:
+        candidates = {wws for dts in ts.dependencies for wws in dts.who_has}
     if valid_workers is None:
         if not candidates:
             candidates = set(all_workers)
