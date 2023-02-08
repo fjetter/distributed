@@ -1775,8 +1775,6 @@ class SchedulerState:
         for prefix_name, count in task_prefix_count.items():
             # TODO: Deal with unknown tasks better
             prefix = self.task_prefixes[prefix_name]
-            if any(self.is_rootish_tg(tg) for tg in prefix.groups):
-                continue
             assert prefix is not None
             duration = prefix.duration_average
             if duration < 0:
@@ -7937,10 +7935,10 @@ def decide_worker(
     *objective* function.
     """
     assert all(dts.who_has for dts in ts.dependencies)
-    candidates = set(all_workers)
-    # if ts.actor:
-    # else:
-    #     candidates = {wws for dts in ts.dependencies for wws in dts.who_has}
+    if ts.actor:
+        candidates = set(all_workers)
+    else:
+        candidates = {wws for dts in ts.dependencies for wws in dts.who_has}
     if valid_workers is None:
         if not candidates:
             candidates = set(all_workers)
