@@ -3020,11 +3020,14 @@ class SchedulerState:
 
         stack_time = ws.occupancy / ws.nthreads
         start_time = stack_time + comm_bytes / self.bandwidth
-
+        # Everything below 0.1s is ignored
+        start_time = math.floor(start_time * 10)
+        # Everything below 100KiB is effectively ignored.
+        nbytes = math.floor(ws.nbytes / 1024**2)
         if ts.actor:
-            return (len(ws.actors), start_time, ws.nbytes)
+            return (len(ws.actors), start_time, nbytes)
         else:
-            return (start_time, ws.nbytes)
+            return (start_time, nbytes)
 
     def add_replica(self, ts: TaskState, ws: WorkerState) -> None:
         """Note that a worker holds a replica of a task with state='memory'"""
