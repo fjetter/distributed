@@ -165,7 +165,9 @@ async def test_web_preload():
         },
     ) as request, captured_logger("distributed.preloading") as log:
         async with Scheduler(
-            host="localhost", preload=["http://example.com/preload"]
+            host="localhost",
+            preload=["http://example.com/preload"],
+            dashboard_address=":0",
         ) as s:
             assert s.foo == 1
         assert (
@@ -215,7 +217,7 @@ async def test_web_preload_worker():
         "urllib3.PoolManager.request",
         **{"return_value.data": data},
     ) as request:
-        async with Scheduler(port=port, host="localhost") as s:
+        async with Scheduler(port=port, host="localhost", dashboard_address=":0") as s:
             async with Nanny(preload_nanny=["http://example.com/preload"]) as nanny:
                 assert nanny.scheduler_addr == s.address
     assert request.mock_calls == [

@@ -4173,7 +4173,7 @@ def test_runspec_regression_sync(loop):
 
     da = pytest.importorskip("dask.array")
     np = pytest.importorskip("numpy")
-    with Client(loop=loop):
+    with Client(loop=loop, dashboard_address=":0"):
         v = da.random.random((20, 20), chunks=(5, 5))
 
         overlapped = da.map_overlap(np.sum, v, depth=2, boundary="reflect")
