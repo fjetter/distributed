@@ -5626,7 +5626,7 @@ def test_client_async_before_loop_starts(cleanup):
             DeprecationWarning,
             match=r"Constructing LoopRunner\(loop=loop\) without a running loop is deprecated",
         ):
-            client = Client(asynchronous=True, loop=loop)
+            client = Client(asynchronous=True, loop=loop, dashboard_address=":0")
         assert client.asynchronous
         assert isinstance(client.close(), NoOpAwaitable)
         loop.run_sync(close)  # TODO: client.close() does not unset global client

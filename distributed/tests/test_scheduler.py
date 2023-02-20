@@ -1871,7 +1871,7 @@ async def test_scheduler_file():
 @pytest.mark.parametrize(
     "dashboard_address,expect",
     [
-        (None, ("::", "0.0.0.0")),
+        (":0", ("::", "0.0.0.0")),
         ("127.0.0.1:0", ("127.0.0.1",)),
     ],
 )
