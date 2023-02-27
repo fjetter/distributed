@@ -476,9 +476,12 @@ class DataFrameShuffleRun(ShuffleRun[int, int, "pd.DataFrame"]):
         if not filtered:
             return
         try:
-            groups = await self.offload(self._repartition_buffers, filtered)
-            del filtered
-            await self._write_to_disk(groups)
+
+            def _() -> None:
+                groups = self._repartition_buffers(filtered)
+                asyncio.run(self._write_to_disk(groups))
+
+            await self.offload(_)
         except Exception as e:
             self._exception = e
             raise
