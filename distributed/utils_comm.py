@@ -13,7 +13,7 @@ from tlz import concat, drop, groupby, merge
 
 import dask.config
 from dask.optimization import SubgraphCallable
-from dask.utils import is_namedtuple_instance, parse_timedelta, stringify
+from dask.utils import is_namedtuple_instance, parse_timedelta
 
 from distributed.core import ConnectionPool, rpc
 from distributed.utils import All
@@ -209,7 +209,7 @@ def _unpack_remotedata_inner(
             if futures:  # If no futures is in the subgraph, we just use `sc` as-is
                 found_keys.update(futures)
                 future_keys = (
-                    tuple(stringify(f.key) for f in futures)
+                    tuple(f.key for f in futures)
                     if byte_keys
                     else tuple(f.key for f in futures)
                 )
@@ -244,7 +244,7 @@ def _unpack_remotedata_inner(
     elif issubclass(typ, WrappedKey):  # TODO use type is Future
         k = o.key
         if byte_keys:
-            k = stringify(k)
+            k = k
         found_keys.add(o)
         return k
     else:

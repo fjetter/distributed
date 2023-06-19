@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from collections.abc import MutableMapping
 
-from dask.utils import stringify
-
 from distributed.utils import log_errors
 
 
@@ -33,14 +31,14 @@ class PublishExtension:
     def put(self, keys=None, data=None, name=None, override=False, client=None):
         if not override and name in self.datasets:
             raise KeyError("Dataset %s already exists" % name)
-        self.scheduler.client_desires_keys(keys, f"published-{stringify(name)}")
+        self.scheduler.client_desires_keys(keys, f"published-{name}")
         self.datasets[name] = {"data": data, "keys": keys}
         return {"status": "OK", "name": name}
 
     @log_errors
     def delete(self, name=None):
         out = self.datasets.pop(name, {"keys": []})
-        self.scheduler.client_releases_keys(out["keys"], f"published-{stringify(name)}")
+        self.scheduler.client_releases_keys(out["keys"], f"published-{name}")
 
     @log_errors
     def list(self, *args):

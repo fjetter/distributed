@@ -21,7 +21,6 @@ dd = pytest.importorskip("dask.dataframe")
 
 import dask
 from dask.distributed import Event, Nanny, Worker
-from dask.utils import stringify
 
 from distributed.client import Client
 from distributed.diagnostics.plugin import SchedulerPlugin
@@ -1094,10 +1093,10 @@ async def test_restrictions(c, s, a, b):
     y = y.persist(workers=a.address)
 
     await x
-    assert all(stringify(key) in b.data for key in x.__dask_keys__())
+    assert all(key in b.data for key in x.__dask_keys__())
 
     await y
-    assert all(stringify(key) in a.data for key in y.__dask_keys__())
+    assert all(key in a.data for key in y.__dask_keys__())
 
 
 @gen_cluster(client=True)

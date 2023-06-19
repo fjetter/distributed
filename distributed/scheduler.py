@@ -52,13 +52,13 @@ from tornado.ioloop import IOLoop
 import dask
 import dask.utils
 from dask.core import get_deps
+from dask.highlevelgraph import HighLevelGraph
 from dask.utils import (
     format_bytes,
     format_time,
     key_split,
     parse_bytes,
     parse_timedelta,
-    stringify,
     tmpfile,
 )
 from dask.widgets import get_template
@@ -127,7 +127,6 @@ if TYPE_CHECKING:
     # TODO import from typing (requires Python >=3.10)
     from typing_extensions import TypeAlias
 
-    from dask.highlevelgraph import HighLevelGraph
 
 # Not to be confused with distributed.worker_state_machine.TaskStateState
 TaskStateState: TypeAlias = Literal[
@@ -4362,7 +4361,6 @@ class Scheduler(SchedulerState, ServerNode):
             dsk,
             dependencies,
             layer_annotations,
-            pre_stringified_keys,
         ) = self.materialize_graph(graph)
 
         requested_keys = set(keys)
@@ -4404,7 +4402,6 @@ class Scheduler(SchedulerState, ServerNode):
             tasks=new_tasks,
             annotations=annotations,
             layer_annotations=layer_annotations,
-            pre_stringified_keys=pre_stringified_keys,
         )
 
         self._set_priorities(
@@ -4531,7 +4528,6 @@ class Scheduler(SchedulerState, ServerNode):
         tasks: Iterable[TaskState],
         annotations: dict,
         layer_annotations: dict[str, dict],
-        pre_stringified_keys: dict[Hashable, str],
     ) -> dict[str, dict[str, Any]]:
         """Apply the provided annotations to the provided `TaskState` objects.
 
@@ -4572,7 +4568,7 @@ class Scheduler(SchedulerState, ServerNode):
             for annot, value in out.items():
                 # Pop the key since names don't always match attributes
                 if callable(value):
-                    value = value(pre_stringified_keys[key])
+                    value = value(key)
                 out[annot] = value
                 resolved_annotations[annot][key] = value
 
@@ -4721,16 +4717,19 @@ class Scheduler(SchedulerState, ServerNode):
         return done
 
     @staticmethod
-    def materialize_graph(hlg: HighLevelGraph) -> tuple[dict, dict, dict, dict]:
+    def materialize_graph(hlg: HighLevelGraph) -> tuple[dict, dict, dict]:
         from distributed.worker import dumps_task
 
-        key_annotations = {}
         dsk = dask.utils.ensure_dict(hlg)
 
-        for layer in hlg.layers.values():
-            if layer.annotations:
-                annot = layer.annotations
-                key_annotations.update({stringify(k): annot for k in layer})
+        try:
+            key_annotations = hlg.__dask_annotations__()  # type: ignore
+        except AttributeError:
+            key_annotations = {}
+            for layer in hlg.layers.values():
+                if layer.annotations:
+                    annot = layer.annotations
+                    key_annotations.update({k: annot for k in layer})
 
         dependencies, _ = get_deps(dsk)
 
@@ -4749,18 +4748,11 @@ class Scheduler(SchedulerState, ServerNode):
         new_dsk = {}
         # Annotation callables are evaluated on the non-stringified version of
         # the keys
-        pre_stringified_keys = {}
-        exclusive = set(hlg)
         for k, v in dsk.items():
-            new_k = stringify(k)
-            pre_stringified_keys[new_k] = k
-            new_dsk[new_k] = stringify(v, exclusive=exclusive)
-        assert len(new_dsk) == len(pre_stringified_keys)
+            new_k = k
+            new_dsk[new_k] = v
         dsk = new_dsk
-        dependencies = {
-            stringify(k): {stringify(dep) for dep in deps}
-            for k, deps in dependencies.items()
-        }
+        dependencies = {k: {dep for dep in deps} for k, deps in dependencies.items()}
 
         # Remove any self-dependencies (happens on test_publish_bag() and others)
         for k, v in dependencies.items():
@@ -4774,7 +4766,7 @@ class Scheduler(SchedulerState, ServerNode):
             if dsk[k] is k:
                 del dsk[k]
         dsk = valmap(dumps_task, dsk)
-        return dsk, dependencies, key_annotations, pre_stringified_keys
+        return dsk, dependencies, key_annotations
 
     def stimulus_queue_slots_maybe_opened(self, *, stimulus_id: str) -> None:
         """Respond to an event which may have opened spots on worker threadpools

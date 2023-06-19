@@ -518,6 +518,8 @@ class DataFrameShuffleRun(ShuffleRun[int, int, "pd.DataFrame"]):
             out = {k: [(input_partition, serialize_table(t))] for k, t in out.items()}
             return out
 
+        if self._comm_buffer.memory_limiter:
+            await self._comm_buffer.memory_limiter.wait_for_available()
         out = await self.offload(_)
         await self._write_to_comm(out)
         return self.run_id

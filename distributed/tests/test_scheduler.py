@@ -24,7 +24,7 @@ from tornado.ioloop import IOLoop
 import dask
 from dask import delayed
 from dask.highlevelgraph import HighLevelGraph, MaterializedLayer
-from dask.utils import apply, parse_timedelta, stringify, tmpfile, typename
+from dask.utils import apply, parse_timedelta, tmpfile, typename
 
 from distributed import (
     CancelledError,
@@ -223,7 +223,7 @@ def test_decide_worker_coschedule_order_neighbors(ndeps, nthreads):
         secondary_worker_key_fractions = []
         for keys in x.__dask_keys__():
             # Iterate along rows of the array.
-            keys = {stringify(k) for k in keys}
+            keys = {k for k in keys}
 
             # No more than 2 workers should have any keys
             assert sum(any(k in w.data for k in keys) for w in workers) <= 2

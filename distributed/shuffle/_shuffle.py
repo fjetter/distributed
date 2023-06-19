@@ -272,6 +272,7 @@ def barrier_key(shuffle_id: ShuffleId) -> str:
     return _BARRIER_PREFIX + shuffle_id
 
 
-def id_from_key(key: str) -> ShuffleId:
-    assert key.startswith(_BARRIER_PREFIX)
-    return ShuffleId(key.replace(_BARRIER_PREFIX, ""))
+def id_from_key(key: tuple[str, ...]) -> ShuffleId:
+    skey = key[0]
+    assert skey.startswith(_BARRIER_PREFIX)
+    return ShuffleId(skey.replace(_BARRIER_PREFIX, ""))

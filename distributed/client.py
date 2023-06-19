@@ -28,7 +28,7 @@ from queue import Queue as pyQueue
 from typing import Any, ClassVar, Literal, NamedTuple, TypedDict
 
 from packaging.version import parse as parse_version
-from tlz import first, groupby, keymap, merge, partition_all, valmap
+from tlz import first, groupby, merge, partition_all, valmap
 
 import dask
 from dask.base import collections_to_dsk, normalize_token, tokenize
@@ -41,7 +41,6 @@ from dask.utils import (
     format_bytes,
     funcname,
     parse_timedelta,
-    stringify,
     typename,
 )
 from dask.widgets import get_template
@@ -210,7 +209,7 @@ class Future(WrappedKey):
     def __init__(self, key, client=None, inform=True, state=None):
         self.key = key
         self._cleared = False
-        self._tkey = stringify(key)
+        self._tkey = key
         self._client = client
         self._input_state = state
         self._inform = inform
@@ -502,7 +501,7 @@ class Future(WrappedKey):
         if not self._cleared and self.client.generation == self._generation:
             self._cleared = True
             try:
-                self.client.loop.add_callback(self.client._dec_ref, stringify(self.key))
+                self.client.loop.add_callback(self.client._dec_ref, self.key)
             except TypeError:  # pragma: no cover
                 pass  # Shutting down, add_callback may be None
 
@@ -1931,7 +1930,7 @@ class Client(SyncMethodMixin):
             else:
                 key = funcname(func) + "-" + str(uuid.uuid4())
 
-        skey = stringify(key)
+        skey = key
 
         with self._refcount_lock:
             if skey in self.futures:
@@ -2166,7 +2165,7 @@ class Client(SyncMethodMixin):
         )
         logger.debug("map(%s, ...)", funcname(func))
 
-        return [futures[stringify(k)] for k in keys]
+        return [futures[k] for k in keys]
 
     async def _gather(self, futures, errors="raise", direct=None, local_worker=None):
         unpacked, future_set = unpack_remotedata(futures, byte_keys=True)
@@ -2178,7 +2177,7 @@ class Client(SyncMethodMixin):
                 f"(this client is {self.id}): "
                 f"{ {f: f.client.id for f in mismatched_futures} }"
             )
-        keys = [stringify(future.key) for future in future_set]
+        keys = [future.key for future in future_set]
         bad_data = dict()
         data = {}
 
@@ -2391,8 +2390,8 @@ class Client(SyncMethodMixin):
         if isinstance(data, dict) and not all(
             isinstance(k, (bytes, str)) for k in data
         ):
-            d = await self._scatter(keymap(stringify, data), workers, broadcast)
-            return {k: d[stringify(k)] for k in data}
+            d = await self._scatter(data, workers, broadcast)
+            return {k: d[k] for k in data}
 
         if isinstance(data, type(range(0))):
             data = list(data)
@@ -2604,7 +2603,7 @@ class Client(SyncMethodMixin):
 
     async def _cancel(self, futures, force=False):
         # FIXME: This method is asynchronous since interacting with the FutureState below requires an event loop.
-        keys = list({stringify(f.key) for f in futures_of(futures)})
+        keys = list({f.key for f in futures_of(futures)})
         self._send_to_scheduler({"op": "cancel-keys", "keys": keys, "force": force})
         for k in keys:
             st = self.futures.pop(k, None)
@@ -2630,7 +2629,7 @@ class Client(SyncMethodMixin):
         return self.sync(self._cancel, futures, asynchronous=asynchronous, force=force)
 
     async def _retry(self, futures):
-        keys = list({stringify(f.key) for f in futures_of(futures)})
+        keys = list({f.key for f in futures_of(futures)})
         response = await self.scheduler.retry(keys=keys, client=self.id)
         for key in response:
             st = self.futures[key]
@@ -2654,7 +2653,7 @@ class Client(SyncMethodMixin):
         coroutines = []
 
         def add_coro(name, data):
-            keys = [stringify(f.key) for f in futures_of(data)]
+            keys = [f.key for f in futures_of(data)]
             coroutines.append(
                 self.scheduler.publish_put(
                     keys=keys,
@@ -3136,7 +3135,7 @@ class Client(SyncMethodMixin):
                     "op": "update-graph",
                     "graph_header": header,
                     "graph_frames": frames,
-                    "keys": list(map(stringify, keys)),
+                    "keys": list(keys),
                     "internal_priority": internal_priority,
                     "submitting_task": getattr(thread_state, "key", None),
                     "fifo_timeout": fifo_timeout,
@@ -3262,7 +3261,7 @@ class Client(SyncMethodMixin):
         with self._refcount_lock:
             changed = False
             for key in list(dsk):
-                if stringify(key) in self.futures:
+                if key in self.futures:
                     if not changed:
                         changed = True
                         dsk = ensure_dict(dsk)
@@ -3770,7 +3769,7 @@ class Client(SyncMethodMixin):
     async def _rebalance(self, futures=None, workers=None):
         if futures is not None:
             await _wait(futures)
-            keys = list({stringify(f.key) for f in self.futures_of(futures)})
+            keys = list({f.key for f in self.futures_of(futures)})
         else:
             keys = None
         result = await self.scheduler.rebalance(keys=keys, workers=workers)
@@ -3806,7 +3805,7 @@ class Client(SyncMethodMixin):
     async def _replicate(self, futures, n=None, workers=None, branching_factor=2):
         futures = self.futures_of(futures)
         await _wait(futures)
-        keys = {stringify(f.key) for f in futures}
+        keys = {f.key for f in futures}
         await self.scheduler.replicate(
             keys=list(keys), n=n, workers=workers, branching_factor=branching_factor
         )
@@ -3927,7 +3926,7 @@ class Client(SyncMethodMixin):
         """
         if futures is not None:
             futures = self.futures_of(futures)
-            keys = list(map(stringify, {f.key for f in futures}))
+            keys = list({f.key for f in futures})
         else:
             keys = None
 
@@ -4063,7 +4062,7 @@ class Client(SyncMethodMixin):
         keys = keys or []
         if futures is not None:
             futures = self.futures_of(futures)
-            keys += list(map(stringify, {f.key for f in futures}))
+            keys += list({f.key for f in futures})
         return self.sync(self.scheduler.call_stack, keys=keys or None)
 
     def profile(
@@ -4647,10 +4646,9 @@ class Client(SyncMethodMixin):
             k = (k,)
         for kk in k:
             if dask.is_dask_collection(kk):
-                for kkk in kk.__dask_keys__():
-                    yield stringify(kkk)
+                yield from kk.__dask_keys__()
             else:
-                yield stringify(kk)
+                yield kk
 
     @staticmethod
     def collections_to_dsk(collections, *args, **kwargs):
@@ -5655,7 +5653,7 @@ def fire_and_forget(obj):
         future.client._send_to_scheduler(
             {
                 "op": "client-desires-keys",
-                "keys": [stringify(future.key)],
+                "keys": [future.key],
                 "client": "fire-and-forget",
             }
         )

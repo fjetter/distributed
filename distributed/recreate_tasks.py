@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import logging
 
-from dask.utils import stringify
-
 from distributed.client import futures_of, wait
 from distributed.utils import sync
 from distributed.utils_comm import pack_data
@@ -29,7 +27,7 @@ class ReplayTaskScheduler:
     def _process_key(self, key):
         if isinstance(key, list):
             key = tuple(key)  # ensure not a list from msgpack
-        key = stringify(key)
+        key = key
         return key
 
     def get_error_cause(self, *args, keys=(), **kwargs):
