@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import pathlib
 import shutil
+from collections.abc import Awaitable
+from typing import Callable
 
 from distributed.shuffle._buffer import ShardsBuffer
 from distributed.shuffle._limiter import ResourceLimiter
@@ -40,6 +42,7 @@ class DiskShardsBuffer(ShardsBuffer):
 
     def __init__(
         self,
+        write: Callable[[list[bytes], str | pathlib.Path], Awaitable[None]],
         directory: str | pathlib.Path,
         memory_limiter: ResourceLimiter | None = None,
     ):
@@ -48,6 +51,7 @@ class DiskShardsBuffer(ShardsBuffer):
             # Disk is not able to run concurrently atm
             concurrency_limit=1,
         )
+        self._write = write
         self.directory = pathlib.Path(directory)
         self.directory.mkdir(exist_ok=True)
 
@@ -68,11 +72,7 @@ class DiskShardsBuffer(ShardsBuffer):
         with log_errors():
             # Consider boosting total_size a bit here to account for duplication
             with self.time("write"):
-                with open(
-                    self.directory / str(id), mode="ab", buffering=100_000_000
-                ) as f:
-                    for shard in shards:
-                        f.write(shard)
+                await self._write(shards, self.directory / str(id))
 
     def read(self, id: int | str) -> bytes:
         """Read a complete file back into memory"""

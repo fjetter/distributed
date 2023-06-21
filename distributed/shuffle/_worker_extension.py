@@ -5,10 +5,11 @@ import asyncio
 import contextlib
 import logging
 import os
+import pathlib
 import pickle
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, overload
@@ -80,6 +81,7 @@ class ShuffleRun(Generic[T_transfer_shard_id, T_partition_id, T_partition_type])
         self.closed = False
 
         self._disk_buffer = DiskShardsBuffer(
+            write=self.write,
             directory=directory,
             memory_limiter=memory_limiter_disk,
         )
@@ -117,12 +119,30 @@ class ShuffleRun(Generic[T_transfer_shard_id, T_partition_id, T_partition_type])
         # up the comm pool on scheduler side
         await self.scheduler.shuffle_barrier(id=self.id, run_id=self.run_id)
 
+    async def write(
+        self, shards: Iterable[bytes], location: str | pathlib.Path
+    ) -> None:
+        def _() -> None:
+            # TODO: Consider caching FDs
+            with open(location, mode="ab", buffering=100_000_000) as f:
+                for shard in shards:
+                    f.write(shard)
+
+        await self.offload(_)
+
     async def send(
         self, address: str, shards: list[tuple[T_transfer_shard_id, bytes]]
     ) -> None:
         self.raise_if_closed()
+
+        def _() -> bytes:
+            # About 10x faster than allowing the distributed protocol to do it's
+            # magic
+            return pickle.dumps(tuple(shards))
+
+        data = await self.offload(_)
         return await self.rpc(address).shuffle_receive(
-            data=to_serialize(shards),
+            data=to_serialize(data),
             shuffle_id=self.id,
             run_id=self.run_id,
         )
@@ -203,8 +223,12 @@ class ShuffleRun(Generic[T_transfer_shard_id, T_partition_id, T_partition_type])
         data: bytes = self._disk_buffer.read("_".join(str(i) for i in id))
         return data
 
-    async def receive(self, data: list[tuple[T_transfer_shard_id, bytes]]) -> None:
-        await self._receive(data)
+    async def receive(self, data: bytes) -> None:
+        def _() -> list[tuple[T_transfer_shard_id, bytes]]:
+            return pickle.loads(data)
+
+        shards = await self.offload(_)
+        await self._receive(shards)
 
     async def _ensure_output_worker(self, i: T_partition_id, key: str) -> None:
         assigned_worker = self._get_assigned_worker(i)
@@ -478,8 +502,8 @@ class DataFrameShuffleRun(ShuffleRun[int, int, "pd.DataFrame"]):
         self.partitions_of = dict(partitions_of)
         self.worker_for = pd.Series(worker_for, name="_workers").astype("category")
 
-    async def receive(self, data: list[tuple[int, bytes]]) -> None:
-        await self._receive(data)
+    # async def receive(self, data: list[tuple[int, bytes]]) -> None:
+    #     await self._receive(data)
 
     async def _receive(self, data: list[tuple[int, bytes]]) -> None:
         self.raise_if_closed()
@@ -584,7 +608,9 @@ class ShuffleWorkerExtension:
         self.memory_limiter_comms = ResourceLimiter(parse_bytes("100 MiB"))
         self.memory_limiter_disk = ResourceLimiter(parse_bytes("1 GiB"))
         self.closed = False
-        self._executor = ThreadPoolExecutor(self.worker.state.nthreads)
+        self._executor = ThreadPoolExecutor(
+            self.worker.state.nthreads, thread_name_prefix="p2p-offload"
+        )
 
     # Handlers
     ##########
@@ -597,7 +623,7 @@ class ShuffleWorkerExtension:
         self,
         shuffle_id: ShuffleId,
         run_id: int,
-        data: list[tuple[int, bytes]],
+        data: bytes,
     ) -> None:
         """
         Handler: Receive an incoming shard of data from a peer worker.
