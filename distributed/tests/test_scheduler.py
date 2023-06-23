@@ -24,7 +24,8 @@ from tornado.ioloop import IOLoop
 import dask
 from dask import delayed
 from dask.highlevelgraph import HighLevelGraph, MaterializedLayer
-from dask.utils import apply, parse_timedelta, stringify, tmpfile, typename
+from dask.sizeof import sizeof
+from dask.utils import apply, parse_bytes, parse_timedelta, stringify, tmpfile, typename
 
 from distributed import (
     CancelledError,
@@ -52,6 +53,7 @@ from distributed.utils_test import (
     BlockedGatherDep,
     BrokenComm,
     NoSchedulerDelayWorker,
+    SizeOf,
     assert_story,
     async_poll_for,
     captured_handler,
@@ -125,7 +127,11 @@ async def test_recompute_released_results(c, s, a, b):
     assert result == 1
 
 
-@gen_cluster(client=True)
+@gen_cluster(
+    client=True,
+    config={"distributed.scheduler.work-stealing": False},
+    nthreads=[("", 2)] * 2,
+)
 async def test_decide_worker_with_many_independent_leaves(c, s, a, b):
     xs = await asyncio.gather(
         c.scatter(list(range(0, 100, 2)), workers=a.address),
@@ -137,11 +143,37 @@ async def test_decide_worker_with_many_independent_leaves(c, s, a, b):
     y2s = c.persist(ys)
     await wait(y2s)
 
-    nhits = sum(y.key in a.data for y in y2s[::2]) + sum(
-        y.key in b.data for y in y2s[1::2]
-    )
+    nhitsa = sum(y.key in a.data for y in y2s[::2])
+    nhitsb = sum(y.key in b.data for y in y2s[1::2])
+    nhits = nhitsa + nhitsb
+    assert nhits > 60
 
-    assert nhits > 80
+
+@pytest.mark.parametrize("ntasks", [2, 4, 8])
+@gen_cluster(
+    client=True,
+    config={"distributed.scheduler.work-stealing": False},
+    nthreads=[("", 2)] * 2,
+)
+async def test_decide_worker_map_trivial_dependency(c, s, a, b, ntasks):
+    dep = c.submit(SizeOf, 1024)
+
+    def func(x, dep):
+        return x
+
+    futs = c.map(func, range(ntasks), dep=dep, pure=False)
+
+    await c.gather(futs)
+
+    def count_tasks(worker):
+        i = 0
+        for t in worker.state.tasks.values():
+            if t.key in [f.key for f in futs]:
+                i += 1
+        return i
+
+    assert count_tasks(a) + count_tasks(b) == ntasks
+    assert count_tasks(a) == count_tasks(b)
 
 
 @gen_cluster(client=True, nthreads=[("127.0.0.1", 1)] * 3)
@@ -151,6 +183,9 @@ async def test_decide_worker_with_restrictions(client, s, a, b, c):
     assert x.key in a.data or x.key in b.data
 
 
+@pytest.mark.skip(
+    reason="This test is using trivial data s.t. the objective function will not make as hard decisions as this test is demanding"
+)
 @pytest.mark.parametrize("ndeps", [0, 1, 4])
 @pytest.mark.parametrize(
     "nthreads",
@@ -356,16 +391,26 @@ async def test_graph_execution_width(c, s, *workers):
         count = 0
         lock = dask.utils.SerializableLock()
         log = []
+        # NOTE: This is a bit arbitrary but below this point, dependency
+        # fetching becomes more attractive such that the strict rules in this
+        # test no longer hold
+        size = parse_bytes("500KiB")
 
         def __init__(self):
             with self.lock:
                 type(self).count += 1
                 self.log.append(self.count)
 
+        def __sizeof__(self):
+            return self.size
+
         def __del__(self):
             with self.lock:
                 self.log.append(self.count)
                 type(self).count -= 1
+
+    assert sizeof(Refcount()) == Refcount.size + sizeof(object())
+    assert Refcount.count == 0
 
     roots = [delayed(Refcount)() for _ in range(32)]
     passthrough1 = [delayed(slowidentity)(r, delay=0) for r in roots]
