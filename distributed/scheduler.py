@@ -110,6 +110,7 @@ from distributed.utils import (
     key_split_group,
     log_errors,
     no_default,
+    offload,
     recursive_to_dict,
     validate_key,
     wait_for,
@@ -3507,6 +3508,7 @@ class Scheduler(SchedulerState, ServerNode):
         self.idle_since = time()
         self.time_started = self.idle_since  # compatibility for dask-gateway
         self._lock = asyncio.Lock()
+        self._update_graph_lock = asyncio.Lock()
         self.bandwidth_workers = defaultdict(float)
         self.bandwidth_types = defaultdict(float)
 
@@ -4317,7 +4319,7 @@ class Scheduler(SchedulerState, ServerNode):
         }
         return msg
 
-    def update_graph(
+    async def update_graph(
         self,
         client: str,
         graph_header: dict,
@@ -4331,6 +4333,44 @@ class Scheduler(SchedulerState, ServerNode):
         code: tuple[SourceCode, ...] = (),
         annotations: dict | None = None,
         stimulus_id: str | None = None,
+    ) -> None:
+        # Task state update is not written in a way that allows for concurrency
+        # This is also sensitive to ordering and therefore locking is the safe
+        # choice.
+        async with self._update_graph_lock:
+            # Note: The offload executor has only a single thread, i.e. this
+            # will effectively block all network communication that is requiring
+            # offloading
+            await offload(
+                self._update_graph_internal,
+                client=client,
+                graph_header=graph_header,
+                graph_frames=graph_frames,
+                keys=keys,
+                internal_priority=internal_priority,
+                submitting_task=submitting_task,
+                user_priority=user_priority,
+                actors=actors,
+                fifo_timeout=fifo_timeout,
+                code=code,
+                annotations=annotations,
+                stimulus_id=stimulus_id,
+            )
+
+    def _update_graph_internal(
+        self,
+        client: str,
+        graph_header: dict,
+        graph_frames: list[bytes],
+        keys: list[str],
+        internal_priority: dict[str, int] | None,
+        submitting_task: str | None,
+        user_priority: int | dict[str, int],
+        actors: bool | list[str] | None,
+        fifo_timeout: float,
+        code: tuple[SourceCode, ...],
+        annotations: dict | None,
+        stimulus_id: str | None,
     ) -> None:
         start = time()
         try:
