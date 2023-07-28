@@ -112,6 +112,7 @@ from distributed.utils import (
     key_split_group,
     log_errors,
     no_default,
+    offload,
     recursive_to_dict,
     validate_key,
     wait_for,
@@ -3764,6 +3765,7 @@ class Scheduler(SchedulerState, ServerNode):
         setproctitle("dask scheduler [not started]")
         Scheduler._instances.add(self)
         self.rpc.allow_offload = False
+        self._update_graph_lock = asyncio.Lock()
 
     ##################
     # Administration #
@@ -4448,7 +4450,40 @@ class Scheduler(SchedulerState, ServerNode):
             dependencies.pop(anc, None)
         return lost_keys
 
-    def update_graph(
+    def _update_graph_static(
+        self,
+        graph_header: dict,
+        graph_frames: list[bytes],
+        annotations: dict,
+        keys: set[str],
+        order: bool,
+    ) -> tuple[dict, dict, dict, set[str], dict]:
+        # TODO: Consider moving this stuff into a module
+        if isinstance(annotations, ToPickle):  # type: ignore
+            # FIXME: what the heck?
+            annotations = annotations.data  # type: ignore
+        (
+            dsk,
+            dependencies,
+            annotations_by_type,
+        ) = self._materialize_graph(graph_header, graph_frames, annotations)
+        del graph_header, graph_frames
+        lost_keys = self._match_graph_with_tasks(self.tasks, dsk, dependencies, keys)
+        ordered: dict = {}
+        if order:
+            # Removing all non-local keys before calling order()
+            dsk_keys = set(dsk)  # intersection() of sets is much faster than dict_keys
+            stripped_deps = {
+                k: v.intersection(dsk_keys)
+                for k, v in dependencies.items()
+                if k in dsk_keys
+            }
+            ordered = dask.order.order(dsk, dependencies=stripped_deps)
+            assert ordered
+
+        return dsk, dependencies, annotations_by_type, lost_keys, ordered
+
+    async def update_graph(
         self,
         client: str,
         graph_header: dict,
@@ -4463,42 +4498,48 @@ class Scheduler(SchedulerState, ServerNode):
         annotations: dict | None = None,
         stimulus_id: str | None = None,
     ) -> None:
-        start = time()
-        annotations = annotations or {}
-        if isinstance(annotations, ToPickle):  # type: ignore
-            # FIXME: what the heck?
-            annotations = annotations.data  # type: ignore
-        try:
-            (
-                dsk,
-                dependencies,
-                annotations_by_type,
-            ) = self._materialize_graph(graph_header, graph_frames, annotations)
-            del graph_header, graph_frames
-        except RuntimeError as e:
-            err = error_message(e)
-            for key in keys:
-                self.report(
-                    {
-                        "op": "task-erred",
-                        "key": key,
-                        "exception": err["exception"],
-                        "traceback": err["traceback"],
-                    }
+        async with self._update_graph_lock:
+            start = time()
+            try:
+                # TODO: Reusing the offload TPE may be an issue here since this
+                # simultaneously block other offloaded serialization. This could
+                # matter if users are submitting large graphs while also running
+                # other tasks
+                (
+                    dsk,
+                    dependencies,
+                    annotations_by_type,
+                    lost_keys,
+                    ordered,
+                ) = await offload(
+                    self._update_graph_static,
+                    graph_header=graph_header,
+                    graph_frames=graph_frames,
+                    annotations=annotations or {},
+                    keys=keys,
+                    order=not internal_priority,
                 )
-        keys = set(keys)
-        lost_keys = self._match_graph_with_tasks(self.tasks, dsk, dependencies, keys)
-        ordered: dict = {}
-        if not internal_priority:
-            # Removing all non-local keys before calling order()
-            dsk_keys = set(dsk)  # intersection() of sets is much faster than dict_keys
-            stripped_deps = {
-                k: v.intersection(dsk_keys)
-                for k, v in dependencies.items()
-                if k in dsk_keys
-            }
-            ordered = dask.order.order(dsk, dependencies=stripped_deps)
-            assert ordered
+                del graph_header, graph_frames
+
+            except RuntimeError as e:
+                err = error_message(e)
+                for key in keys:
+                    self.report(
+                        {
+                            "op": "task-erred",
+                            "key": key,
+                            "exception": err["exception"],
+                            "traceback": err["traceback"],
+                        }
+                    )
+
+        # ****************************** WARNING ******************************
+        # Everything below this point is not written concurrency safe.
+        # Therefore introduction of any `await`s should be considered very
+        # carefully. The lock would not even be sufficient since otherwise all
+        # handlers that operate and possibly mutate TaskState would need to
+        # be locked as well.
+        # *********************************************************************
 
         stimulus_id = stimulus_id or f"update-graph-{time()}"
 
