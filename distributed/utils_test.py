@@ -875,7 +875,7 @@ def gen_cluster(
     active_rpc_timeout: float = 1,
     config: dict[str, Any] | None = None,
     clean_kwargs: dict[str, Any] | None = None,
-    allow_unclosed: bool = True,
+    allow_unclosed: bool = False,
     cluster_dump_directory: str | Literal[False] = "test_cluster_dump",
 ) -> Callable[[Callable], Callable]:
     from distributed import Client
@@ -1073,6 +1073,31 @@ def gen_cluster(
                                 if allow_unclosed:
                                     print(f"Unclosed Comms: {unclosed}")
                                 else:
+                                    for c in Comm._instances:
+                                        if not c.closed():
+                                            import traceback
+                                            import tracemalloc
+
+                                            tb = tracemalloc.get_object_traceback(c)
+                                            traceback.print_tb(tb)
+                                            if hasattr(c, "_pool"):
+                                                pool = c._pool()
+                                                if pool:
+                                                    msg = f"""{pool}
+                                                    {pool.status}
+                                                    In created: {c in pool._created}
+                                                    connecting: {pool._connecting_count}
+                                                    pending: {pool._pending_count}
+                                                    In occupied: {any(c in pool.occupied[addr] for addr in pool.occupied)}
+                                                    In available: {any(c in pool.available[addr] for addr in pool.available)}
+                                                    """
+                                                    raise AssertionError(msg)
+                                                raise AssertionError(
+                                                    "Pool already collected"
+                                                )
+                                            raise AssertionError(
+                                                f"Has pool: {hasattr(c, '_pool')}"
+                                            )
                                     raise RuntimeError("Unclosed Comms", unclosed)
                         finally:
                             del unclosed

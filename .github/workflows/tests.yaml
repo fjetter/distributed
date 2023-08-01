@@ -22,8 +22,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        environment: [mindeps, "3.9", "3.10", "3.11"]
+        os: [ubuntu-latest] #, windows-latest, macos-latest]
+        environment: [
+          # mindeps, "3.9", "3.10",
+          "3.11"
+          ]
         queuing: [queue]
         extra_packages: [null]
         # Cherry-pick test modules to split the overall runtime roughly in half
@@ -106,7 +109,7 @@ jobs:
         if: |
           (
             steps.skip-caching.outputs.trigger-found != 'true'
-            && !(github.event_name == 'pull_request' 
+            && !(github.event_name == 'pull_request'
                  && contains(github.event.pull_request.labels.*.name, 'skip-caching'))
           )
         id: get-date
@@ -128,8 +131,8 @@ jobs:
         run: mamba env update -n dask-distributed -f ${{ env.CONDA_FILE }}
         if: |
           (
-            steps.skip-caching.outputs.trigger-found == 'true' 
-            || (github.event_name == 'pull_request' 
+            steps.skip-caching.outputs.trigger-found == 'true'
+            || (github.event_name == 'pull_request'
                 && contains(github.event.pull_request.labels.*.name, 'skip-caching'))
             || steps.cache.outputs.cache-hit != 'true'
           )

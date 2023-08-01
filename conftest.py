@@ -1,12 +1,17 @@
 # https://pytest.org/latest/example/simple.html#control-skipping-of-tests-according-to-command-line-option
 from __future__ import annotations
 
+import tracemalloc
+
 import pytest
 
 # Uncomment to enable more logging and checks
 # (https://docs.python.org/3/library/asyncio-dev.html)
 # Note this makes things slower and might consume much memory.
 # os.environ["PYTHONASYNCIODEBUG"] = "1"
+
+
+tracemalloc.start()
 
 try:
     import faulthandler
