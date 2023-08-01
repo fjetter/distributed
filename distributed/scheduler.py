@@ -4458,10 +4458,6 @@ class Scheduler(SchedulerState, ServerNode):
         keys: set[str],
         order: bool,
     ) -> tuple[dict, dict, dict, set[str], dict]:
-        # TODO: Consider moving this stuff into a module
-        if isinstance(annotations, ToPickle):  # type: ignore
-            # FIXME: what the heck?
-            annotations = annotations.data  # type: ignore
         (
             dsk,
             dependencies,
@@ -4498,6 +4494,9 @@ class Scheduler(SchedulerState, ServerNode):
         annotations: dict | None = None,
         stimulus_id: str | None = None,
     ) -> None:
+        # FIXME: Apparently empty dicts arrive as a ToPickle object
+        if isinstance(annotations, ToPickle):
+            annotations = annotations.data  # type: ignore[unreachable]
         async with self._update_graph_lock:
             start = time()
             try:
@@ -4543,7 +4542,6 @@ class Scheduler(SchedulerState, ServerNode):
 
         stimulus_id = stimulus_id or f"update-graph-{time()}"
 
-        # FIXME: How can I log this cleanly?
         if len(dsk) > 1:
             self.log_event(
                 ["all", client], {"action": "update_graph", "count": len(dsk)}
@@ -4568,6 +4566,7 @@ class Scheduler(SchedulerState, ServerNode):
             # FIXME: This is kind of inconsistent since it only includes global
             # annotations.
             computation.annotations.update(annotations)
+        del annotations
 
         runnable, touched_tasks, new_tasks = self._generate_taskstates(
             keys=keys,
