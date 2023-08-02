@@ -5,7 +5,7 @@ import contextlib
 import itertools
 import logging
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Hashable, Iterable, Sequence
 from dataclasses import dataclass, field
 from functools import partial
 from itertools import product
@@ -389,7 +389,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
 
     def transition(
         self,
-        key: str,
+        key: Hashable,
         start: TaskStateState,
         finish: TaskStateState,
         *args: Any,
@@ -399,7 +399,7 @@ class ShuffleSchedulerPlugin(SchedulerPlugin):
         """Clean up scheduler and worker state once a shuffle becomes inactive."""
         if finish not in ("released", "forgotten"):
             return
-        if not key.startswith("shuffle-barrier-"):
+        if not isinstance(key, str) or not key.startswith("shuffle-barrier-"):
             return
         shuffle_id = id_from_key(key)
 

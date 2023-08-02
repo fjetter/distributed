@@ -282,7 +282,7 @@ def unpack_remotedata(o: Any, byte_keys: bool = False) -> tuple[Any, set]:
     return _unpack_remotedata_inner(o, byte_keys, found_keys), found_keys
 
 
-def pack_data(o, d, key_types=object):
+def pack_data(o, d):
     """Merge known data into tuple or dict
 
     Parameters
@@ -304,17 +304,16 @@ def pack_data(o, d, key_types=object):
     """
     typ = type(o)
     try:
-        if isinstance(o, key_types) and o in d:
-            return d[o]
-    except TypeError:
+        return d[o]
+    except (TypeError, KeyError):
         pass
 
     if typ in collection_types:
-        return typ([pack_data(x, d, key_types=key_types) for x in o])
+        return typ([pack_data(x, d) for x in o])
     elif typ is dict:
-        return {k: pack_data(v, d, key_types=key_types) for k, v in o.items()}
+        return {k: pack_data(v, d) for k, v in o.items()}
     elif is_namedtuple_instance(o):
-        return _namedtuple_packing(o, partial(pack_data, d=d, key_types=key_types))
+        return _namedtuple_packing(o, partial(pack_data, d=d))
     else:
         return o
 

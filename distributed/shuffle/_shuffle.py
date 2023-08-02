@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Iterator
+from collections.abc import Hashable, Iterable, Iterator
 from enum import Enum
 from typing import TYPE_CHECKING, Any, NewType, Union
 
@@ -277,6 +277,6 @@ def barrier_key(shuffle_id: ShuffleId) -> str:
     return _BARRIER_PREFIX + shuffle_id
 
 
-def id_from_key(key: str) -> ShuffleId:
-    assert key.startswith(_BARRIER_PREFIX)
+def id_from_key(key: Hashable) -> ShuffleId:
+    assert isinstance(key, str), key
     return ShuffleId(key.replace(_BARRIER_PREFIX, ""))

@@ -38,8 +38,6 @@ from typing import (
     cast,
 )
 
-from tlz import peekn
-
 import dask
 from dask.utils import key_split, parse_bytes, typename
 
@@ -3740,9 +3738,7 @@ class BaseWorker(abc.ABC):
 
             elif isinstance(inst, GatherDep):
                 assert inst.to_gather
-                keys_str = ", ".join(peekn(27, inst.to_gather)[0])
-                if len(keys_str) > 80:
-                    keys_str = keys_str[:77] + "..."
+                keys_str = str(hash(tuple(sorted(inst.to_gather))))
 
                 self._start_async_instruction(
                     f"gather_dep({inst.worker}, {{{keys_str}}})",

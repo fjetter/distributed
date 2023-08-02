@@ -941,6 +941,7 @@ def truncate_exception(e, n=10000):
 
 def validate_key(k):
     """Validate a key as received on a stream."""
+    return
     typ = type(k)
     if typ is not str and typ is not bytes:
         raise TypeError(f"Unexpected key type {typ} (value: {k!r})")

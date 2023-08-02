@@ -8,7 +8,6 @@ from tlz import valmap
 
 import dask
 from dask.core import get_deps
-from dask.utils import stringify
 
 from distributed.protocol import deserialize
 from distributed.utils_comm import unpack_remotedata
@@ -40,10 +39,7 @@ def materialize_graph(
             annot = layer.annotations
             for annot_type, value in annot.items():
                 annotations_by_type[annot_type].update(
-                    {
-                        stringify(k): (value(k) if callable(value) else value)
-                        for k in layer
-                    }
+                    {k: (value(k) if callable(value) else value) for k in layer}
                 )
 
     dependencies, _ = get_deps(dsk)
@@ -60,18 +56,8 @@ def materialize_graph(
     # - Add in deps for any tasks that depend on futures
     for k, futures in fut_deps.items():
         dependencies[k].update(f.key for f in futures)
-    new_dsk = {}
-    # Annotation callables are evaluated on the non-stringified version of
-    # the keys
-    exclusive = set(graph)
-    for k, v in dsk.items():
-        new_k = stringify(k)
-        new_dsk[new_k] = stringify(v, exclusive=exclusive)
-    dsk = new_dsk
-    dependencies = {
-        stringify(k): {stringify(dep) for dep in deps}
-        for k, deps in dependencies.items()
-    }
+
+    dependencies = {k: {dep for dep in deps} for k, deps in dependencies.items()}
 
     # Remove any self-dependencies (happens on test_publish_bag() and others)
     for k, v in dependencies.items():
