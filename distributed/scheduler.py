@@ -14,7 +14,6 @@ import os
 import pickle
 import random
 import sys
-import textwrap
 import uuid
 import warnings
 import weakref
@@ -53,20 +52,19 @@ from tornado.ioloop import IOLoop
 
 import dask
 import dask.utils
-from dask.core import get_deps
 from dask.utils import (
     format_bytes,
     format_time,
     key_split,
     parse_bytes,
     parse_timedelta,
-    stringify,
     tmpfile,
 )
 from dask.widgets import get_template
 
 from distributed import cluster_dump, preloading, profile
 from distributed import versions as version_module
+from distributed._graph import materialize_maybe_order
 from distributed._stories import scheduler_story
 from distributed.active_memory_manager import ActiveMemoryManagerExtension, RetireWorker
 from distributed.batched import BatchedSend
@@ -121,7 +119,6 @@ from distributed.utils_comm import (
     gather_from_workers,
     retry_operation,
     scatter_to_workers,
-    unpack_remotedata,
 )
 from distributed.utils_perf import disable_gc_diagnosis, enable_gc_diagnosis
 from distributed.variable import VariableExtension
@@ -4321,93 +4318,14 @@ class Scheduler(SchedulerState, ServerNode):
         }
         return msg
 
-    @staticmethod
-    def _materialize_graph(
-        graph_header: dict, graph_frames: list[bytes], global_annotations: dict
-    ) -> tuple[dict, dict, dict]:
-        try:
-            from distributed.protocol import deserialize
-
-            graph = deserialize(graph_header, graph_frames).data
-            del graph_header, graph_frames
-        except Exception as e:
-            msg = """\
-                Error during deserialization of the task graph. This frequently occurs if the Scheduler and Client have different environments. For more information, see https://docs.dask.org/en/stable/deployment-considerations.html#consistent-software-environments
-            """
-            raise RuntimeError(textwrap.dedent(msg)) from e
-
-        from distributed.worker import dumps_task
-
-        dsk = dask.utils.ensure_dict(graph)
-
-        annotations_by_type: defaultdict[str, dict[str, Any]] = defaultdict(dict)
-        for annotations_type, value in global_annotations.items():
-            annotations_by_type[annotations_type].update(
-                {k: (value(k) if callable(value) else value) for k in dsk}
-            )
-
-        for layer in graph.layers.values():
-            if layer.annotations:
-                annot = layer.annotations
-                for annot_type, value in annot.items():
-                    annotations_by_type[annot_type].update(
-                        {
-                            stringify(k): (value(k) if callable(value) else value)
-                            for k in layer
-                        }
-                    )
-
-        dependencies, _ = get_deps(dsk)
-
-        # Remove `Future` objects from graph and note any future dependencies
-        dsk2 = {}
-        fut_deps = {}
-        for k, v in dsk.items():
-            dsk2[k], futs = unpack_remotedata(v, byte_keys=True)
-            if futs:
-                fut_deps[k] = futs
-        dsk = dsk2
-
-        # - Add in deps for any tasks that depend on futures
-        for k, futures in fut_deps.items():
-            dependencies[k].update(f.key for f in futures)
-        new_dsk = {}
-        # Annotation callables are evaluated on the non-stringified version of
-        # the keys
-        exclusive = set(graph)
-        for k, v in dsk.items():
-            new_k = stringify(k)
-            new_dsk[new_k] = stringify(v, exclusive=exclusive)
-        dsk = new_dsk
-        dependencies = {
-            stringify(k): {stringify(dep) for dep in deps}
-            for k, deps in dependencies.items()
-        }
-
-        # Remove any self-dependencies (happens on test_publish_bag() and others)
-        for k, v in dependencies.items():
-            deps = set(v)
-            if k in deps:
-                deps.remove(k)
-            dependencies[k] = deps
-
-        # Remove aliases
-        for k in list(dsk):
-            if dsk[k] is k:
-                del dsk[k]
-        dsk = valmap(dumps_task, dsk)
-
-        return dsk, dependencies, annotations_by_type
-
-    @staticmethod
-    def _match_graph_with_tasks(known_tasks, dsk, dependencies, keys):
+    def _match_graph_with_tasks(self, dsk, dependencies, keys):
         n = 0
         lost_keys = set()
         while len(dsk) != n:  # walk through new tasks, cancel any bad deps
             n = len(dsk)
             for k, deps in list(dependencies.items()):
                 if any(
-                    dep not in known_tasks and dep not in dsk for dep in deps
+                    dep not in self.tasks and dep not in dsk for dep in deps
                 ):  # bad key
                     lost_keys.add(k)
                     logger.info("User asked for computation on lost data, %s", k)
@@ -4419,8 +4337,8 @@ class Scheduler(SchedulerState, ServerNode):
         # Avoid computation that is already finished
         already_in_memory = set()  # tasks that are already done
         for k, v in dependencies.items():
-            if v and k in known_tasks:
-                ts = known_tasks[k]
+            if v and k in self.tasks:
+                ts = self.tasks[k]
                 if ts.state in ("memory", "erred"):
                     already_in_memory.add(k)
 
@@ -4433,16 +4351,16 @@ class Scheduler(SchedulerState, ServerNode):
                 try:
                     deps = dependencies[key]
                 except KeyError:
-                    deps = known_tasks[key].dependencies
+                    deps = self.tasks[key].dependencies
                 for dep in deps:
                     if dep in dependents:
                         child_deps = dependents[dep]
-                    elif dep in known_tasks:
-                        child_deps = known_tasks[dep].dependencies
+                    elif dep in self.tasks:
+                        child_deps = self.tasks[dep].dependencies
                     else:
                         child_deps = set()
                     if all(d in done for d in child_deps):
-                        if dep in known_tasks and dep not in done:
+                        if dep in self.tasks and dep not in done:
                             done.add(dep)
                             stack.append(dep)
         for anc in done:
@@ -4450,97 +4368,36 @@ class Scheduler(SchedulerState, ServerNode):
             dependencies.pop(anc, None)
         return lost_keys
 
-    def _update_graph_static(
+    def _create_taskstate_from_graph(
         self,
-        graph_header: dict,
-        graph_frames: list[bytes],
-        annotations: dict,
+        *,
+        start: float,
+        dsk: dict,
+        dependencies: dict,
         keys: set[str],
-        order: bool,
-    ) -> tuple[dict, dict, dict, set[str], dict]:
-        (
-            dsk,
-            dependencies,
-            annotations_by_type,
-        ) = self._materialize_graph(graph_header, graph_frames, annotations)
-        del graph_header, graph_frames
-        lost_keys = self._match_graph_with_tasks(self.tasks, dsk, dependencies, keys)
-        ordered: dict = {}
-        if order:
-            # Removing all non-local keys before calling order()
-            dsk_keys = set(dsk)  # intersection() of sets is much faster than dict_keys
-            stripped_deps = {
-                k: v.intersection(dsk_keys)
-                for k, v in dependencies.items()
-                if k in dsk_keys
-            }
-            ordered = dask.order.order(dsk, dependencies=stripped_deps)
-            assert ordered
-
-        return dsk, dependencies, annotations_by_type, lost_keys, ordered
-
-    async def update_graph(
-        self,
+        ordered: dict[str, int],
         client: str,
-        graph_header: dict,
-        graph_frames: list[bytes],
-        keys: set[str],
-        internal_priority: dict[str, int] | None,
+        annotations_by_type: dict,
+        global_annotations: dict | None,
+        stimulus_id: str,
         submitting_task: str | None,
         user_priority: int | dict[str, int] = 0,
         actors: bool | list[str] | None = None,
         fifo_timeout: float = 0.0,
         code: tuple[SourceCode, ...] = (),
-        annotations: dict | None = None,
-        stimulus_id: str | None = None,
     ) -> None:
-        # FIXME: Apparently empty dicts arrive as a ToPickle object
-        if isinstance(annotations, ToPickle):
-            annotations = annotations.data  # type: ignore[unreachable]
-        async with self._update_graph_lock:
-            start = time()
-            try:
-                # TODO: Reusing the offload TPE may be an issue here since this
-                # simultaneously block other offloaded serialization. This could
-                # matter if users are submitting large graphs while also running
-                # other tasks
-                (
-                    dsk,
-                    dependencies,
-                    annotations_by_type,
-                    lost_keys,
-                    ordered,
-                ) = await offload(
-                    self._update_graph_static,
-                    graph_header=graph_header,
-                    graph_frames=graph_frames,
-                    annotations=annotations or {},
-                    keys=keys,
-                    order=not internal_priority,
-                )
-                del graph_header, graph_frames
+        """
+        Take a low level graph and create the necessary scheduler state to
+        compute it.
 
-            except RuntimeError as e:
-                err = error_message(e)
-                for key in keys:
-                    self.report(
-                        {
-                            "op": "task-erred",
-                            "key": key,
-                            "exception": err["exception"],
-                            "traceback": err["traceback"],
-                        }
-                    )
+        WARNING
+        -------
+        This method must not be made async since nothing here is concurrency
+        safe. All interactions with TaskState objects here should be happening
+        in the same event loop tick.
+        """
 
-        # ****************************** WARNING ******************************
-        # Everything below this point is not written concurrency safe.
-        # Therefore introduction of any `await`s should be considered very
-        # carefully. The lock would not even be sufficient since otherwise all
-        # handlers that operate and possibly mutate TaskState would need to
-        # be locked as well.
-        # *********************************************************************
-
-        stimulus_id = stimulus_id or f"update-graph-{time()}"
+        lost_keys = self._match_graph_with_tasks(dsk, dependencies, keys)
 
         if len(dsk) > 1:
             self.log_event(
@@ -4562,11 +4419,11 @@ class Scheduler(SchedulerState, ServerNode):
 
         if code:  # add new code blocks
             computation.code.add(code)
-        if annotations:
+        if global_annotations:
             # FIXME: This is kind of inconsistent since it only includes global
             # annotations.
-            computation.annotations.update(annotations)
-        del annotations
+            computation.annotations.update(global_annotations)
+        del global_annotations
 
         runnable, touched_tasks, new_tasks = self._generate_taskstates(
             keys=keys,
@@ -4581,7 +4438,7 @@ class Scheduler(SchedulerState, ServerNode):
         )
 
         self._set_priorities(
-            internal_priority=internal_priority or ordered,
+            internal_priority=ordered,
             submitting_task=submitting_task,
             user_priority=user_priority,
             fifo_timeout=fifo_timeout,
@@ -4659,6 +4516,74 @@ class Scheduler(SchedulerState, ServerNode):
             if ts.state in ("memory", "erred"):
                 self.report_on_key(ts=ts, client=client)
 
+    async def update_graph(
+        self,
+        client: str,
+        graph_header: dict,
+        graph_frames: list[bytes],
+        keys: set[str],
+        internal_priority: dict[str, int] | None,
+        submitting_task: str | None,
+        user_priority: int | dict[str, int] = 0,
+        actors: bool | list[str] | None = None,
+        fifo_timeout: float = 0.0,
+        code: tuple[SourceCode, ...] = (),
+        annotations: dict | None = None,
+        stimulus_id: str | None = None,
+    ) -> None:
+        # FIXME: Apparently empty dicts arrive as a ToPickle object
+        if isinstance(annotations, ToPickle):
+            annotations = annotations.data  # type: ignore[unreachable]
+        start = time()
+        async with self._update_graph_lock:
+            try:
+                # TODO: Reusing the offload TPE may be an issue here since this
+                # simultaneously block other offloaded serialization. This could
+                # matter if users are submitting large graphs while also running
+                # other tasks
+                (
+                    dsk,
+                    dependencies,
+                    annotations_by_type,
+                    ordered,
+                ) = await offload(
+                    materialize_maybe_order,
+                    graph_header=graph_header,
+                    graph_frames=graph_frames,
+                    annotations=annotations or {},
+                    order=not internal_priority,
+                )
+                del graph_header, graph_frames
+
+            except RuntimeError as e:
+                err = error_message(e)
+                for key in keys:
+                    self.report(
+                        {
+                            "op": "task-erred",
+                            "key": key,
+                            "exception": err["exception"],
+                            "traceback": err["traceback"],
+                        }
+                    )
+        self._create_taskstate_from_graph(
+            dsk=dsk,
+            client=client,
+            dependencies=dependencies,
+            keys=keys,
+            ordered=internal_priority or ordered,
+            submitting_task=submitting_task,
+            user_priority=user_priority,
+            actors=actors,
+            fifo_timeout=fifo_timeout,
+            code=code,
+            annotations_by_type=annotations_by_type,
+            # FIXME: This is just used to attach to Computation objects. This
+            # should be removed
+            global_annotations=annotations,
+            start=start,
+            stimulus_id=stimulus_id or f"update-graph-{start}",
+        )
         end = time()
         self.digest_metric("update-graph-duration", end - start)
 
