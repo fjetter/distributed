@@ -22,7 +22,7 @@ dependencies:
   # Distributed depends on the latest version of Dask
   - pip
   - pip:
-      - git+https://github.com/hendrikmakait/dask@reduced-p2p-footprint
+      - git+https://github.com/hendrikmakait/dask@default-shuffle-raises-outdated-arrow
   # test dependencies
   - pytest
   - pytest-cov
