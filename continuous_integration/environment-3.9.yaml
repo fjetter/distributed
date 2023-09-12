@@ -50,6 +50,6 @@ dependencies:
   - zict
   - zstandard >=0.9.0
   - pip:
-      - git+https://github.com/dask/dask
+      - git+https://github.com/hendrikmakait/dask@reduced-p2p-footprint
       - git+https://github.com/dask/crick  # Only tested here
       - keras
