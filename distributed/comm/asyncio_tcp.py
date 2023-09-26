@@ -10,14 +10,13 @@ import struct
 import sys
 import weakref
 from asyncio.selector_events import _SelectorSocketTransport  # type: ignore
-from collections.abc import Callable
 from itertools import islice
 from typing import Any
 
 import dask
 
 from distributed.comm.addressing import parse_host_port, unparse_host_port
-from distributed.comm.core import BaseListener, Comm, CommClosedError, Connector
+from distributed.comm.core import Comm, CommClosedError, Connector, Listener
 from distributed.comm.registry import Backend
 from distributed.comm.utils import (
     ensure_concrete_host,
@@ -88,9 +87,6 @@ class DaskCommProtocol(asyncio.BufferedProtocol):
 
     Parameters
     ----------
-    on_connection : callable, optional
-        A callback to call on connection, used server side for handling
-        incoming connections.
     min_read_size : int, optional
         The minimum buffer size to pass to ``socket.recv_into``. Larger sizes
         will result in fewer recv calls, at the cost of more copying. For
@@ -98,7 +94,6 @@ class DaskCommProtocol(asyncio.BufferedProtocol):
         time), a smaller value is likely more performant.
     """
 
-    on_connection: Callable[[DaskCommProtocol], None] | None
     _loop: asyncio.AbstractEventLoop
     #: A queue of received messages
     _queue: asyncio.Queue | None
@@ -132,11 +127,9 @@ class DaskCommProtocol(asyncio.BufferedProtocol):
 
     def __init__(
         self,
-        on_connection: Callable[[DaskCommProtocol], None] | None = None,
         min_read_size: int = 128 * 1024,
     ):
         super().__init__()
-        self.on_connection = on_connection
         self._loop = asyncio.get_running_loop()
         self._queue = asyncio.Queue()
         self._transport = None
@@ -228,8 +221,6 @@ class DaskCommProtocol(asyncio.BufferedProtocol):
         # Set the buffer limits to something more optimal for large data transfer
         # (512 KiB).
         self._transport.set_write_buffer_limits(high=512 * 1024)  # type: ignore
-        if self.on_connection is not None:
-            self.on_connection(self)
 
     def get_buffer(self, sizehint: object) -> memoryview:
         """Get a buffer to read into for this read event"""
@@ -594,7 +585,7 @@ class TLSConnector(TCPConnector):
         return {"ssl": ctx}
 
 
-class TCPListener(BaseListener):
+class TCPListener(Listener):
     prefix = "tcp://"
     comm_class = TCP
 
@@ -621,22 +612,7 @@ class TCPListener(BaseListener):
         _error_if_require_encryption(address, **kwargs)
         return {}
 
-    def _on_connection(self, protocol):
-        comm = self.comm_class(
-            protocol,
-            local_addr=self.prefix + protocol.local_addr,
-            peer_addr=self.prefix + protocol.peer_addr,
-            deserialize=self.deserialize,
-        )
-        comm.allow_offload = self.allow_offload
-        asyncio.ensure_future(self._comm_handler(comm))
-
     async def _comm_handler(self, comm):
-        try:
-            await self.on_connection(comm)
-        except CommClosedError:
-            logger.debug("Connection closed before handshake completed")
-            return
         await self.comm_handler(comm)
 
     async def _start_all_interfaces_with_random_port(self):
@@ -697,7 +673,7 @@ class TCPListener(BaseListener):
 
                 # Create a new server for the socket
                 server = await loop.create_server(
-                    lambda: DaskCommProtocol(self._on_connection),
+                    lambda: DaskCommProtocol(),
                     sock=sock,
                     **self._extra_kwargs,
                 )
@@ -722,7 +698,7 @@ class TCPListener(BaseListener):
         else:
             servers = [
                 await loop.create_server(
-                    lambda: DaskCommProtocol(self._on_connection),
+                    lambda: DaskCommProtocol(),
                     host=self.ip,
                     port=self.port,
                     **self._extra_kwargs,

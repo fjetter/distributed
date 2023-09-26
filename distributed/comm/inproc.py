@@ -11,7 +11,7 @@ from collections import deque, namedtuple
 from tornado.concurrent import Future
 from tornado.ioloop import IOLoop
 
-from distributed.comm.core import BaseListener, Comm, CommClosedError, Connector
+from distributed.comm.core import Comm, CommClosedError, Connector, Listener
 from distributed.comm.registry import Backend, backends
 from distributed.protocol import nested_deserialize
 from distributed.utils import get_ip
@@ -257,7 +257,7 @@ class InProc(Comm):
             return False
 
 
-class InProcListener(BaseListener):
+class InProcListener(Listener):
     prefix = "inproc"
 
     def __init__(self, address, comm_handler, deserialize=True):
@@ -269,11 +269,6 @@ class InProcListener(BaseListener):
         self.listen_q = Queue()
 
     async def _handle_stream(self, comm):
-        try:
-            await self.on_connection(comm)
-        except CommClosedError:
-            logger.debug("Connection closed before handshake completed")
-            return
         await self.comm_handler(comm)
 
     async def _listen(self):

@@ -25,11 +25,11 @@ import dask
 
 from distributed.comm.addressing import parse_host_port, unparse_host_port
 from distributed.comm.core import (
-    BaseListener,
     Comm,
     CommClosedError,
     Connector,
     FatalCommClosedError,
+    Listener,
 )
 from distributed.comm.registry import backends
 from distributed.comm.tcp import (
@@ -83,10 +83,6 @@ class WSHandler(WebSocketHandler):
         asyncio.ensure_future(self.on_open())
 
     async def on_open(self):
-        try:
-            await self.listener.on_connection(self.comm)
-        except CommClosedError:
-            logger.debug("Connection closed before handshake completed")
         await self.handler(self.comm)
 
     async def on_message(self, msg):
@@ -332,7 +328,7 @@ class WSS(WS):
             )
 
 
-class WSListener(BaseListener):
+class WSListener(Listener):
     prefix = "ws://"
 
     def __init__(

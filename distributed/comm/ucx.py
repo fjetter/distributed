@@ -20,7 +20,7 @@ import dask
 from dask.utils import parse_bytes
 
 from distributed.comm.addressing import parse_host_port, unparse_host_port
-from distributed.comm.core import BaseListener, Comm, CommClosedError, Connector
+from distributed.comm.core import Comm, CommClosedError, Connector, Listener
 from distributed.comm.registry import Backend, backends
 from distributed.comm.utils import (
     ensure_concrete_host,
@@ -479,7 +479,7 @@ class UCXConnector(Connector):
         )
 
 
-class UCXListener(BaseListener):
+class UCXListener(Listener):
     prefix = UCXConnector.prefix
     comm_class = UCXConnector.comm_class
     encrypted = UCXConnector.encrypted
@@ -520,11 +520,7 @@ class UCXListener(BaseListener):
                 deserialize=self.deserialize,
             )
             ucx.allow_offload = self.allow_offload
-            try:
-                await self.on_connection(ucx)
-            except CommClosedError:
-                logger.debug("Connection closed before handshake completed")
-                return
+
             if self.comm_handler:
                 await self.comm_handler(ucx)
 

@@ -4,10 +4,9 @@ import asyncio
 import inspect
 import logging
 import random
-import sys
 import weakref
 from abc import ABC, abstractmethod
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import dask
 from dask.utils import parse_timedelta
@@ -15,8 +14,6 @@ from dask.utils import parse_timedelta
 from distributed.comm import registry
 from distributed.comm.addressing import get_address_host, parse_address, resolve_address
 from distributed.metrics import time
-from distributed.protocol.compression import get_compression_settings
-from distributed.protocol.pickle import HIGHEST_PROTOCOL
 from distributed.utils import wait_for
 
 logger = logging.getLogger(__name__)
@@ -139,69 +136,6 @@ class Comm(ABC):
         """
         return {}
 
-    def handshake_info(self) -> dict[str, Any]:
-        """Share environment information with the peer that may differ, i.e. compression
-        settings.
-
-        Notes
-        -----
-        By the time this method runs, the "auto" compression setting has been updated to
-        an actual compression algorithm. This matters if both peers had compression set
-        to 'auto' but only one has lz4 installed. See
-        distributed.protocol.compression._update_and_check_compression_settings()
-
-        See also
-        --------
-        handshake_configuration
-        """
-        if self.same_host:
-            compression = None
-        else:
-            compression = get_compression_settings("distributed.comm.compression")
-
-        return {
-            "compression": compression,
-            "python": tuple(sys.version_info)[:3],
-            "pickle-protocol": HIGHEST_PROTOCOL,
-        }
-
-    @staticmethod
-    def handshake_configuration(
-        local: dict[str, Any], remote: dict[str, Any]
-    ) -> dict[str, Any]:
-        """Find a configuration that is suitable for both local and remote
-
-        Parameters
-        ----------
-        local
-            Output of handshake_info() in this process
-        remote
-            Output of handshake_info() on the remote host
-
-        See also
-        --------
-        handshake_info
-        """
-        try:
-            out = {
-                "pickle-protocol": min(
-                    local["pickle-protocol"], remote["pickle-protocol"]
-                )
-            }
-        except KeyError as e:
-            raise ValueError(
-                "Your Dask versions may not be in sync. "
-                "Please ensure that you have the same version of dask "
-                "and distributed on your client, scheduler, and worker machines"
-            ) from e
-
-        if local["compression"] == remote["compression"]:
-            out["compression"] = local["compression"]
-        else:
-            out["compression"] = None
-
-        return out
-
     def __repr__(self):
         return "<{}{} {} local={} remote={}>".format(
             self.__class__.__name__,
@@ -257,42 +191,6 @@ class Listener(ABC):
             return self
 
         return _().__await__()
-
-    async def on_connection(
-        self, comm: Comm, handshake_overrides: dict[str, Any] | None = None
-    ) -> None:
-        local_info = {**comm.handshake_info(), **(handshake_overrides or {})}
-
-        await comm.write(local_info)
-        handshake = await comm.read()
-
-        comm.remote_info = handshake
-        comm.remote_info["address"] = comm.peer_address
-        comm.local_info = local_info
-        comm.local_info["address"] = comm.local_address
-
-        comm.handshake_options = comm.handshake_configuration(
-            comm.local_info, comm.remote_info
-        )
-
-
-class BaseListener(Listener):
-    def __init__(self) -> None:
-        self.__comms: set[Comm] = set()
-
-    async def on_connection(
-        self, comm: Comm, handshake_overrides: dict[str, Any] | None = None
-    ) -> None:
-        self.__comms.add(comm)
-        try:
-            return await super().on_connection(comm, handshake_overrides)
-        finally:
-            self.__comms.discard(comm)
-
-    def abort_handshaking_comms(self) -> None:
-        comms, self.__comms = self.__comms, set()
-        for comm in comms:
-            comm.abort()
 
 
 class Connector(ABC):
@@ -369,21 +267,6 @@ async def connect(
             f"Timed out trying to connect to {addr} after {timeout} s"
         ) from active_exception
 
-    local_info = {
-        **comm.handshake_info(),
-        **(handshake_overrides or {}),
-    }
-    await comm.write(local_info)
-    handshake = await comm.read()
-
-    comm.remote_info = handshake
-    comm.remote_info["address"] = comm._peer_addr
-    comm.local_info = local_info
-    comm.local_info["address"] = comm._local_addr
-
-    comm.handshake_options = comm.handshake_configuration(
-        comm.local_info, comm.remote_info
-    )
     logger.debug("Connection to %s established", loc)
     return comm
 

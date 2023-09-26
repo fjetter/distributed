@@ -24,11 +24,11 @@ from dask.utils import parse_timedelta
 
 from distributed.comm.addressing import parse_host_port, unparse_host_port
 from distributed.comm.core import (
-    BaseListener,
     Comm,
     CommClosedError,
     Connector,
     FatalCommClosedError,
+    Listener,
 )
 from distributed.comm.registry import Backend
 from distributed.comm.utils import (
@@ -538,7 +538,7 @@ class TLSConnector(BaseTCPConnector):
         return tls_args
 
 
-class BaseTCPListener(BaseListener, RequireEncryptionMixin):
+class BaseTCPListener(Listener, RequireEncryptionMixin):
     def __init__(
         self,
         address,
@@ -605,12 +605,6 @@ class BaseTCPListener(BaseListener, RequireEncryptionMixin):
         local_address = self.prefix + get_stream_address(stream)
         comm = self.comm_class(stream, local_address, address, self.deserialize)
         comm.allow_offload = self.allow_offload
-
-        try:
-            await self.on_connection(comm)
-        except CommClosedError:
-            logger.info("Connection from %s closed before handshake completed", address)
-            return
 
         await self.comm_handler(comm)
 
