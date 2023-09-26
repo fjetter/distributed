@@ -1132,9 +1132,14 @@ def test_split_axes_with_zero():
 
 
 @pytest.mark.parametrize("nworkers", [1, 2, 41, 50])
-def test_worker_for_homogeneous_distribution(nworkers):
+@pytest.mark.parametrize("nout_factor", [1, 10, 100])
+def test_worker_for_homogeneous_distribution(nworkers, nout_factor):
+    # nout_factor: generating nontrivial rechunks automatically is a bit of a
+    # hassle so we're just scaling the one dimension to force more output
+    # chunks. We don't really care about the actual value. The starting point
+    # was taken from another unit test
     old = ((1, 2, 3, 4), (5,) * 6)
-    new = ((5, 5), (12, 18))
+    new = (tuple([5] * nout_factor), (12, 18))
     workers = [str(i) for i in range(nworkers)]
     spec = ArrayRechunkSpec(ShuffleId("foo"), new, old)
     count = {w: 0 for w in workers}
