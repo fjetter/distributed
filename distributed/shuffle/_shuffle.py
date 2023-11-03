@@ -455,6 +455,8 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
     def _repartition_buffers(
         self, data: list[bytes]
     ) -> dict[NDIndex, tuple[pa.Table, int]]:
+        import pyarrow as pa
+
         table = pa.concat_tables(data)
         del data
         nrows = len(table)
