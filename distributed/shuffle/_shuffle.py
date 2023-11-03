@@ -27,9 +27,7 @@ from distributed.shuffle._arrow import (
     check_minimal_arrow_version,
     convert_shards,
     deserialize_table,
-    list_of_buffers_to_table,
     read_from_disk,
-    serialize_table,
     write_to_disk,
 )
 from distributed.shuffle._core import (
@@ -434,9 +432,6 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
         self.partitions_of = dict(partitions_of)
         self.worker_for = worker_for
 
-    async def receive(self, data: list[tuple[int, bytes]]) -> None:
-        await self._receive(data)
-
     async def _receive(self, data: list[tuple[int, bytes]]) -> None:
         self.raise_if_closed()
 
@@ -460,7 +455,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
     def _repartition_buffers(
         self, data: list[bytes]
     ) -> dict[NDIndex, tuple[pa.Table, int]]:
-        table = list_of_buffers_to_table(data)
+        table = pa.concat_tables(data)
         del data
         nrows = len(table)
         metadata_size = sizeof(table.schema.metadata)
@@ -482,7 +477,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
             self.partitions_of,
         )
         del data
-        out = {k: (partition_id, serialize_table(t)) for k, t in out.items()}
+        out = {k: (partition_id, t) for k, t in out.items()}
         return out
 
     def _get_output_partition(
@@ -506,7 +501,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
     def read(self, path: Path) -> tuple[pa.Table, int]:
         return read_from_disk(path)
 
-    def deserialize(self, buffer: bytes) -> Any:
+    def deserialize(self, buffer: Any) -> Any:
         return deserialize_table(buffer)
 
 
