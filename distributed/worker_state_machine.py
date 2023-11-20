@@ -1121,7 +1121,7 @@ class WorkerState:
     running: bool
 
     #: Tasks that are currently waiting for data
-    waiting: set[TaskState]
+    waiting: HeapSet[TaskState]
 
     #: ``{worker address: {ts.key, ...}``.
     #: The data that we care about that we think a worker has
@@ -1295,7 +1295,7 @@ class WorkerState:
         self.validate = validate
         self.tasks = {}
         self.running = True
-        self.waiting = set()
+        self.waiting = HeapSet(key=operator.attrgetter("priority"))
         self.has_what = defaultdict(set)
         self.data_needed = defaultdict(
             partial(HeapSet[TaskState], key=operator.attrgetter("priority"))
@@ -1745,26 +1745,36 @@ class WorkerState:
 
     def _next_ready_task(self) -> TaskState | None:
         """Pop the top-priority task from self.ready or self.constrained"""
-        if self.ready and self.constrained:
+        tsw = tsr = tsc = None
+        candidates = []
+        if self.waiting:
+            tsw = self.waiting.peek()
+            assert tsw.priority
+            candidates.append(tsw)
+
+        if self.ready:
             tsr = self.ready.peek()
-            tsc = self.constrained.peek()
             assert tsr.priority
-            assert tsc.priority
-            if tsc.priority < tsr.priority and self._resource_restrictions_satisfied(
-                tsc
-            ):
-                return self.constrained.pop()
-            else:
-                return self.ready.pop()
+            candidates.append(tsr)
 
-        elif self.ready:
-            return self.ready.pop()
-
-        elif self.constrained:
+        if self.constrained:
             tsc = self.constrained.peek()
+            assert tsc.priority
+            candidates.append(tsc)
+        if not candidates:
+            return None
+        next_ts = min(candidates, key=operator.attrgetter("priority"))
+        if next_ts is tsc:
+            assert tsc
             if self._resource_restrictions_satisfied(tsc):
                 return self.constrained.pop()
-
+            elif tsr is not None:
+                return self.ready.pop()
+        elif next_ts is tsr:
+            # if "sub" in next_ts.key[0]:
+            #     from .worker import print
+            #     print(f"Executing {next_ts.key}")
+            return self.ready.pop()
         return None
 
     def _get_task_finished_msg(

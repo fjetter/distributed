@@ -59,6 +59,7 @@ from distributed.worker_state_machine import (
     SecedeEvent,
     StateMachineEvent,
     TaskErredMsg,
+    TaskFinishedMsg,
     TaskState,
     TransitionCounterMaxExceeded,
     UnpauseEvent,
@@ -1885,3 +1886,57 @@ def test_remove_worker_while_in_fetch(ws):
 def test_remove_worker_unknown(ws):
     ws2 = "127.0.0.1:2"
     ws.handle_stimulus(RemoveWorkerEvent(worker=ws2, stimulus_id="s3"))
+
+
+def test_strict_priority_execution_workers(ws):
+    ws2 = "127.0.0.1:2"
+    instr = ws.handle_stimulus(
+        *(
+            ComputeTaskEvent.dummy(
+                f"x{ix}",
+                priority=(5 * ix,),
+                stimulus_id="s1",
+            )
+            for ix in range(10)
+        )
+    )
+    assert instr == [Execute(key="x0", stimulus_id="s1")]
+
+    instr = ws.handle_stimulus(
+        ExecuteSuccessEvent.dummy(key="x0", stimulus_id="e1"),
+    )
+    # If there is no higher priority task known, just work on the next task
+    assert len(instr) == 2
+    assert instr == [
+        TaskFinishedMsg.match(key="x0", stimulus_id="e1"),
+        Execute(key="x1", stimulus_id="e1"),
+    ]
+    # This one is more important than all other x's so we should not execute
+    # anything else until this can run
+    instr = ws.handle_stimulus(
+        ComputeTaskEvent.dummy(
+            "y1",
+            priority=(2,),
+            stimulus_id="s2",
+            who_has={"y0": [ws2]},
+            nbytes={"y0": 42},
+        ),
+    )
+    assert instr == [
+        GatherDep(worker=ws2, to_gather={"y0"}, total_nbytes=42, stimulus_id="s2")
+    ]
+    instr = ws.handle_stimulus(
+        ExecuteSuccessEvent.dummy(key="x1", stimulus_id="e2"),
+    )
+    # We'll let the scheduler know but will not schedule a new task on the TPE
+    assert instr == [TaskFinishedMsg.match(key="x1")]
+    assert not ws.executing
+    instr = ws.handle_stimulus(
+        GatherDepSuccessEvent(
+            stimulus_id="g1",
+            worker=ws2,
+            total_nbytes=42,
+            data={"y0": 123},
+        )
+    )
+    assert instr == [AddKeysMsg.match(keys=["y0"]), Execute.match(key="y1")]
