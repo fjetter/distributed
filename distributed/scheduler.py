@@ -27,7 +27,6 @@ from collections.abc import (
     Iterable,
     Iterator,
     Mapping,
-    Sequence,
     Set,
 )
 from contextlib import suppress
@@ -2239,41 +2238,12 @@ class SchedulerState:
             # `running`.
             valid_workers = self.running
 
-        if ts.dependencies or valid_workers is not None:
-            ws = decide_worker(
-                ts,
-                self.running,
-                valid_workers,
-                partial(self.worker_objective, ts),
-            )
-        else:
-            # TODO if `is_rootish` would always return True for tasks without
-            # dependencies, we could remove all this logic. The rootish assignment logic
-            # would behave more or less the same as this, maybe without guaranteed
-            # round-robin though? This path is only reachable when `ts` doesn't have
-            # dependencies, but its group is also smaller than the cluster.
-
-            # Fastpath when there are no related tasks or restrictions
-            worker_pool = self.idle or self.workers
-            # FIXME idle and workers are SortedDict's declared as dicts
-            #       because sortedcontainers is not annotated
-            wp_vals = cast("Sequence[WorkerState]", worker_pool.values())
-            n_workers = len(wp_vals)
-            if n_workers < 20:  # smart but linear in small case
-                ws = min(wp_vals, key=operator.attrgetter("occupancy"))
-                assert ws
-                if ws.occupancy == 0:
-                    # special case to use round-robin; linear search
-                    # for next worker with zero occupancy (or just
-                    # land back where we started).
-                    start = self.n_tasks % n_workers
-                    for i in range(n_workers):
-                        wp_i = wp_vals[(i + start) % n_workers]
-                        if wp_i.occupancy == 0:
-                            ws = wp_i
-                            break
-            else:  # dumb but fast in large case
-                ws = wp_vals[self.n_tasks % n_workers]
+        ws = decide_worker(
+            ts,
+            self.running,
+            valid_workers,
+            partial(self.worker_objective, ts),
+        )
 
         if self.validate and ws is not None:
             assert self.workers.get(ws.address) is ws
@@ -3091,42 +3061,122 @@ class SchedulerState:
 
         Minimize expected start time.  If a tie then break with data storage.
         """
-        comm_bytes = sum(
-            dts.get_nbytes()
-            for dts in ts.dependencies
-            if (
-                ws not in dts.who_has
-                and (not CONSIDER_HAS_WHAT or dts not in ws.needs_what)
+        comm_bytes = 0
+        other_network_occ = 0
+        for dts in ts.dependencies:
+            if ws in dts.who_has:
+                continue
+            comm_bytes += dts.get_nbytes()
+            other_network_occ += sum(wws._network_occ for wws in dts.who_has) / len(
+                dts.who_has
             )
-        )
+        # comm_bytes = sum(
+        #     dts.get_nbytes()
+        #     for dts in ts.dependencies
+        #     if (
+        #         ws not in dts.who_has
+        #         and (not CONSIDER_HAS_WHAT or dts not in ws.needs_what)
+        #     )
+        # )
+        # Occupancy should be a measure for an idle cluster being populated
+        # initially where we're trying to determine which workers to saturate.
+        # When the cluster is idle, the initial batch of tasks will be
+        # distributed homogeneously if we follow occupancy but this is
+        # equivalent to task count since at this point we have no information
+        # about task duration.
+        # Once the system is running and the scheduler *reacts* to finished
+        # tasks, it is a reasonable assumption that the dependents of that task
+        # that are now unlocked are very high priority and will likely cut the
+        # line such that this start / stack time estimation is fundamentally
+        # false and the only true measure is the *network occupancy* and the
+        # cost of transfer.
+        # The actual occupancy that is going to delay the start time of the task
+        # is the time of the currently *executing* tasks, i.e the tasks on the
+        # TPE of the workers which is information we don't have readily
+        # available here
+        # This becomes more complicated if a task-finsihed event is received
+        # that unlocks multiple tasks. Particularly for tasks with many dependents, there are multiple cases to consider
+        # 1) Split tasks (tasks shuffle, rechunk, repartition)
+        # 2) Fan outs (e.g. xarray workloads or zarr arrays with a common array as a seed that could/should be inlined)
+        # The first case should be handled by assigning all tasks to the same
+        # worker where the finished task is running where the second case
+        # benefits from us basically ignoring that such a common root task even
+        # exists.
+        # Split tasks are typically very data heavy while the common meta tasks
+        # are very light. If we factor in latency penalties and normalize
+        # sufficiently small "comm costs" (a diff of 0.001 should not influence
+        # the decision since at this point other factos like memory usage or CPU
+        # occupancy is likely a stronger indicator)
+        # start_time = comm_bytes  #/ self.bandwidth
+        coassign = 0
 
-        stack_time = ws.occupancy / ws.nthreads
-        start_time = stack_time + comm_bytes / self.bandwidth
-
-        if comm_bytes:
-            # Generous latency/overhead penalty (empiric)
-            # -------------------------------------------
-            # There are numerous factors to consider that affect primarily small
-            # transfers
-            # - Network latency
-            # - Event loop delay on both sides
-            # - Cold ConnectionPools (e.g. TCP+Dask handshake amplify above)
-            # We cannot accurately measure this and therefore just apply a
-            # general penalty to suppress network transfers a little
-            #
-            # Note: This coincides with DEFAULT_TASK_DURATION / nthreads==2
-            # This means that a 2 Thread worker with one task is a tie on
-            # start_time with a worker with zero tasks but a trivial transfer
-            start_time += LATENCY_PENALTY
+        # Generous latency/overhead penalty (empiric)
+        # -------------------------------------------
+        # There are numerous factors to consider that affect primarily small
+        # transfers
+        # - Network latency
+        # - Event loop delay on both sides
+        # - Cold ConnectionPools (e.g. TCP+Dask handshake amplify above)
+        # We cannot accurately measure this and therefore just apply a
+        # general penalty to suppress network transfers a little
+        #
+        # Note: This coincides with DEFAULT_TASK_DURATION / nthreads==2
+        # This means that a 2 Thread worker with one task is a tie on
+        # start_time with a worker with zero tasks but a trivial transfer
+        # start_time += LATENCY_PENALTY * 100_000
 
         # Differences below 10ms are meaningless and we should rather break ties
         # by nbytes
-        start_time = round(start_time, 2)
-
-        if ts.actor:
-            return (len(ws.actors), start_time, ws.nbytes)
+        # start_time = round(start_time, 2)
+        if comm_bytes:
+            start_time = int(2 * comm_bytes + ws._network_occ + other_network_occ)
+            start_time /= 1024
         else:
-            return (start_time, ws.nbytes)
+            start_time = 0
+
+        return (start_time, coassign, len(ws.processing), ws.nbytes)
+
+    # def worker_objective(self, ts: TaskState, ws: WorkerState) -> tuple:
+    #     """Objective function to determine which worker should get the task
+
+    #     Minimize expected start time.  If a tie then break with data storage.
+    #     """
+    #     comm_bytes = sum(
+    #         dts.get_nbytes()
+    #         for dts in ts.dependencies
+    #         if (
+    #             ws not in dts.who_has
+    #             and (not CONSIDER_HAS_WHAT or dts not in ws.needs_what)
+    #         )
+    #     )
+
+    #     stack_time = ws.occupancy / ws.nthreads
+    #     start_time = stack_time + comm_bytes / self.bandwidth
+
+    #     if comm_bytes:
+    #         # Generous latency/overhead penalty (empiric)
+    #         # -------------------------------------------
+    #         # There are numerous factors to consider that affect primarily small
+    #         # transfers
+    #         # - Network latency
+    #         # - Event loop delay on both sides
+    #         # - Cold ConnectionPools (e.g. TCP+Dask handshake amplify above)
+    #         # We cannot accurately measure this and therefore just apply a
+    #         # general penalty to suppress network transfers a little
+    #         #
+    #         # Note: This coincides with DEFAULT_TASK_DURATION / nthreads==2
+    #         # This means that a 2 Thread worker with one task is a tie on
+    #         # start_time with a worker with zero tasks but a trivial transfer
+    #         start_time += LATENCY_PENALTY
+
+    #     # Differences below 10ms are meaningless and we should rather break ties
+    #     # by nbytes
+    #     start_time = round(start_time, 2)
+
+    #     if ts.actor:
+    #         return (len(ws.actors), start_time, ws.nbytes)
+    #     else:
+    #         return (start_time, ws.nbytes)
 
     def add_replica(self, ts: TaskState, ws: WorkerState) -> None:
         """Note that a worker holds a replica of a task with state='memory'"""
