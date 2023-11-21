@@ -11,7 +11,7 @@ import subprocess
 import sys
 import uuid
 import zipfile
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from dask.typing import Key
@@ -87,7 +87,7 @@ class SchedulerPlugin:
         keys: set[Key],
         tasks: list[Key],
         annotations: dict[str, dict[Key, Any]],
-        priority: dict[Key, tuple[int | float, ...]],
+        priority: Mapping[Key, tuple[int | float, ...]],
         dependencies: dict[Key, set[Key]],
         **kwargs: Any,
     ) -> None:

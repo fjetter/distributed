@@ -30,6 +30,7 @@ from collections.abc import (
     Set,
 )
 from contextlib import suppress
+from contextvars import ContextVar
 from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, cast, overload
 
@@ -190,6 +191,10 @@ DEFAULT_EXTENSIONS = {
 }
 LATENCY_PENALTY = dask.config.get("distributed.scheduler.latency-penalty", 0.25)
 CONSIDER_HAS_WHAT = dask.config.get("distributed.scheduler.consider-has-what", False)
+
+INIT_TASK_BATCHSIZE: ContextVar[tuple[int, int]] = ContextVar(
+    "INIT_TASK_BATCHSIZE", default=(0, 0)
+)
 
 
 class ClientState:
@@ -500,6 +505,9 @@ class WorkerState:
     # Reference to scheduler task_groups
     scheduler_ref: weakref.ref[SchedulerState] | None
     task_prefix_count: defaultdict[str, int]
+
+    priority_offset: int
+
     _network_occ: float
     _occupancy_cache: float | None
 
@@ -560,6 +568,7 @@ class WorkerState:
         self.task_prefix_count = defaultdict(int)
         self.needs_what = {}
         self._network_occ = 0
+        self.priority_offset = 0
         self._occupancy_cache = None
 
     def __hash__(self) -> int:
@@ -1198,7 +1207,11 @@ class TaskState:
     #: within a large graph that may be important, such as if they are on the critical
     #: path, or good to run in order to release many dependencies.  This is explained
     #: further in :doc:`Scheduling Policy <scheduling-policies>`.
-    priority: tuple[float, ...] | None
+
+    generation: int | float
+    priority_offset: int
+    user_priority: int
+    internal_priority: int
 
     # Attribute underlying the state property
     _state: TaskStateState
@@ -1401,7 +1414,10 @@ class TaskState:
         self.suspicious = 0
         self.retries = 0
         self.nbytes = -1
-        self.priority = None
+        self.generation = -1
+        self.priority_offset = 0
+        self.user_priority = -1
+        self.internal_priority = -1
         self.who_wants = set()
         self.dependencies = set()
         self.dependents = set()
@@ -1424,6 +1440,19 @@ class TaskState:
         self.erred_on = set()
         self.run_id = None
         TaskState._instances.add(self)
+
+    @property
+    def priority(self) -> tuple[int, int | float, int]:
+        return (self.user_priority, self.generation, self.internal_priority)
+
+    @property
+    def priority_bias_corrected(self) -> tuple[int, int | float, int, int]:
+        return (
+            self.user_priority,
+            self.generation,
+            self.internal_priority - self.priority_offset,
+            self.internal_priority,
+        )
 
     def __hash__(self) -> int:
         return self._hash
@@ -2231,25 +2260,48 @@ class SchedulerState:
         """
         if not self.running:
             return None
-
+        ws: WorkerState | None
         valid_workers = self.valid_workers(ts)
         if valid_workers is None and len(self.running) < len(self.workers):
             # If there were no restrictions, `valid_workers()` didn't subset by
             # `running`.
             valid_workers = self.running
+        ntasks_start, initial_batch_size = INIT_TASK_BATCHSIZE.get()
+        # FIXME: This is a very crude thing that only works for update_graph atm
+        # but it could be easily generalized to be set for all task-finsihed
+        # messages iff the cluster is idle which should be a decent
+        # approximation for priority based co-assignment
+        if initial_batch_size:
+            # FIXME: Previously this included `idle` but this messes with the
+            # assignment logic below since it doesn't keep the worker_pool
+            # values stable
+            worker_pool = self.workers
+            # FIXME idle and workers are SortedDict's declared as dicts
+            #       because sortedcontainers is not annotated
+            # FIXME: This is horrible from a performance POV
+            wp_vals = sorted(worker_pool.values(), key=lambda ws: str(ws.name))
+            n_workers = len(wp_vals)
+            import math
 
-        ws = decide_worker(
-            ts,
-            self.running,
-            valid_workers,
-            partial(self.worker_objective, ts),
-        )
+            tasks_per_worker = math.ceil(initial_batch_size / n_workers)
+            worker_ix = math.floor((self.n_tasks - ntasks_start) / tasks_per_worker)
+            ws = wp_vals[worker_ix]
+            if not ws.processing:
+                ws.priority_offset = ts.internal_priority
+            return ws
+        else:
+            ws = decide_worker(
+                ts,
+                self.running,
+                valid_workers,
+                partial(self.worker_objective, ts),
+            )
 
-        if self.validate and ws is not None:
-            assert self.workers.get(ws.address) is ws
-            assert ws in self.running, (ws, self.running)
+            if self.validate and ws is not None:
+                assert self.workers.get(ws.address) is ws
+                assert ws in self.running, (ws, self.running)
 
-        return ws
+            return ws
 
     def transition_waiting_processing(self, key: Key, stimulus_id: str) -> RecsMsgs:
         """Possibly schedule a ready task. This is the primary dispatch for ready tasks.
@@ -3062,7 +3114,7 @@ class SchedulerState:
         Minimize expected start time.  If a tie then break with data storage.
         """
         comm_bytes = 0
-        other_network_occ = 0
+        other_network_occ = 0.0
         for dts in ts.dependencies:
             if ws in dts.who_has:
                 continue
@@ -3070,6 +3122,7 @@ class SchedulerState:
             other_network_occ += sum(wws._network_occ for wws in dts.who_has) / len(
                 dts.who_has
             )
+        other_network_occ = 0
         # comm_bytes = sum(
         #     dts.get_nbytes()
         #     for dts in ts.dependencies
@@ -3108,7 +3161,6 @@ class SchedulerState:
         # the decision since at this point other factos like memory usage or CPU
         # occupancy is likely a stronger indicator)
         # start_time = comm_bytes  #/ self.bandwidth
-        coassign = 0
 
         # Generous latency/overhead penalty (empiric)
         # -------------------------------------------
@@ -3128,13 +3180,14 @@ class SchedulerState:
         # Differences below 10ms are meaningless and we should rather break ties
         # by nbytes
         # start_time = round(start_time, 2)
+        start_time: float | int
         if comm_bytes:
             start_time = int(2 * comm_bytes + ws._network_occ + other_network_occ)
             start_time /= 1024
         else:
             start_time = 0
 
-        return (start_time, coassign, len(ws.processing), ws.nbytes)
+        return (ws in self.saturated, start_time, len(ws.processing), ws.nbytes)
 
     # def worker_objective(self, ts: TaskState, ws: WorkerState) -> tuple:
     #     """Objective function to determine which worker should get the task
@@ -3241,6 +3294,11 @@ class SchedulerState:
         self.acquire_resources(ts, ws)
         self.check_idle_saturated(ws)
         self.n_tasks += 1
+
+        ts.priority_offset = max(
+            (dts.priority_offset for dts in ts.dependencies),
+            default=ws.priority_offset,
+        )
 
         if ts.actor:
             ws.actors.add(ts)
@@ -3450,12 +3508,12 @@ class SchedulerState:
         if duration < 0:
             duration = self.get_task_duration(ts)
         ts.run_id = next(TaskState._run_id_iterator)
-        assert ts.priority, ts
+        assert ts.priority_bias_corrected, ts
         msg: dict[str, Any] = {
             "op": "compute-task",
             "key": ts.key,
             "run_id": ts.run_id,
-            "priority": ts.priority,
+            "priority": ts.priority_bias_corrected,
             "duration": duration,
             "stimulus_id": f"compute-task-{time()}",
             "who_has": {
@@ -4605,6 +4663,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         # Compute recommendations
         recommendations: Recs = {}
+        nrunnable = 0
         priority = dict()
         for ts in sorted(
             runnable,
@@ -4616,6 +4675,8 @@ class Scheduler(SchedulerState, ServerNode):
             assert ts.run_spec
             if ts.state == "released":
                 recommendations[ts.key] = "waiting"
+                if not ts.dependencies:
+                    nrunnable += 1
 
         for ts in runnable:
             for dts in ts.dependencies:
@@ -4657,8 +4718,11 @@ class Scheduler(SchedulerState, ServerNode):
                 )
             except Exception as e:
                 logger.exception(e)
-
-        self.transitions(recommendations, stimulus_id)
+        token = INIT_TASK_BATCHSIZE.set((self.n_tasks, nrunnable))
+        try:
+            self.transitions(recommendations, stimulus_id)
+        finally:
+            INIT_TASK_BATCHSIZE.reset(token)
 
         for ts in touched_tasks:
             if ts.state in ("memory", "erred"):
@@ -4900,18 +4964,9 @@ class Scheduler(SchedulerState, ServerNode):
             # originate from a Layer annotation which takes precedence over the
             # global annotation.
             annotated_prio = ts.annotations.get("priority", task_user_prio)
-
-            if not ts.priority and ts.key in internal_priority:
-                ts.priority = (
-                    -annotated_prio,
-                    generation,
-                    internal_priority[ts.key],
-                )
-
-            if self.validate and ts.run_spec:
-                assert isinstance(ts.priority, tuple) and all(
-                    isinstance(el, (int, float)) for el in ts.priority
-                )
+            ts.generation = generation
+            ts.user_priority = -annotated_prio
+            ts.internal_priority = internal_priority[ts.key]
 
     def stimulus_queue_slots_maybe_opened(self, *, stimulus_id: str) -> None:
         """Respond to an event which may have opened spots on worker threadpools
@@ -8356,15 +8411,15 @@ def decide_worker(
     of bytes sent between workers.  This is determined by calling the
     *objective* function.
     """
+    assert all_workers
     assert all(dts.who_has for dts in ts.dependencies)
     candidates = set(all_workers)
-    if valid_workers is not None:
-        candidates = valid_workers
-        if not candidates and ts.loose_restrictions:
+    if valid_workers is not None and not valid_workers:
+        if ts.loose_restrictions:
             return decide_worker(ts, all_workers, None, objective)
+        else:
+            return None
 
-    if not candidates:
-        return None
     elif len(candidates) == 1:
         return next(iter(candidates))
     else:

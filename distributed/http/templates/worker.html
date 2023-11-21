@@ -33,10 +33,10 @@
                 <th> Task </th>
                 <th> Priority </th>
             </tr>
-            {% for ts in sorted(ws.processing, key=lambda ts: ts.priority) %}
+            {% for ts in sorted(ws.processing, key=lambda ts: ts.priority_bias_corrected) %}
             <tr>
                 <td> <a href="../task/{{ url_escape(str(ts.key)) }}.html">{{ts.key}}</a></td>
-                <td> {{ts.priority }} </td>
+                <td> {{ts.priority_bias_corrected }} </td>
             </tr>
             {% end %}
           </table>
