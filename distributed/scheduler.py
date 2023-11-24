@@ -1224,7 +1224,7 @@ class TaskState:
     #: successfully executed and have their result stored on at least one worker. This
     #: is tracked by progressively draining the :attr:`waiting_on` set.
     dependencies: set[TaskState]
-
+    required_transfer: bool
     #: The set of tasks which depend on this task.  Only tasks still alive are listed in
     #: this set. This is the reverse mapping of :attr:`dependencies`.
     dependents: set[TaskState]
@@ -1284,6 +1284,10 @@ class TaskState:
     #: If this task is in the "processing" state, which worker is currently processing
     #: it. This attribute is kept in sync with :attr:`WorkerState.processing`.
     processing_on: WorkerState | None
+    computed_on: WorkerState | None
+    finished: float | None
+    assigned: float | None
+    duration: float | None
 
     #: The number of times this task can automatically be retried in case of failure.
     #: If a task fails executing (the worker returns with an error), its :attr:`retries`
@@ -1403,6 +1407,7 @@ class TaskState:
         state: TaskStateState,
     ):
         self.key = key
+        self.required_transfer = False
         self._hash = hash(key)
         self.run_spec = run_spec
         self._state = state
@@ -1439,6 +1444,9 @@ class TaskState:
         self.annotations = {}
         self.erred_on = set()
         self.run_id = None
+        self.computed_on = None
+        self.finished = None
+        self.assigned = None
         TaskState._instances.add(self)
 
     @property
@@ -1450,7 +1458,7 @@ class TaskState:
         return (
             self.user_priority,
             self.generation,
-            self.internal_priority - self.priority_offset,
+            max(0, self.internal_priority - self.priority_offset),
             self.internal_priority,
         )
 
@@ -2401,6 +2409,8 @@ class SchedulerState:
         #############################
         if startstops:
             for startstop in startstops:
+                if startstop["action"] == "compute":
+                    ts.duration = startstop["stop"] - startstop["start"]
                 ts.group.add_duration(
                     stop=startstop["stop"],
                     start=startstop["start"],
@@ -3299,7 +3309,8 @@ class SchedulerState:
             (dts.priority_offset for dts in ts.dependencies),
             default=ws.priority_offset,
         )
-
+        ts.priority_offset = max(ts.priority_offset, ws.priority_offset)
+        ts.priority_offset += 1
         if ts.actor:
             ws.actors.add(ts)
 
@@ -3357,6 +3368,8 @@ class SchedulerState:
         """
         ws = ts.processing_on
         assert ws
+        ts.computed_on = ws
+        ts.finished = time()
         ts.processing_on = None
 
         ws.remove_from_processing(ts)
@@ -3508,6 +3521,7 @@ class SchedulerState:
         if duration < 0:
             duration = self.get_task_duration(ts)
         ts.run_id = next(TaskState._run_id_iterator)
+        ts.assigned = time()
         assert ts.priority_bias_corrected, ts
         msg: dict[str, Any] = {
             "op": "compute-task",
@@ -5740,6 +5754,8 @@ class Scheduler(SchedulerState, ServerNode):
         if worker not in self.workers:
             return
         self.validate_key(key)
+        ts = self.tasks[key]
+        ts.required_transfer = msg.pop("required_transfer", False)
 
         r: tuple = self.stimulus_task_finished(
             key=key, worker=worker, stimulus_id=stimulus_id, **msg

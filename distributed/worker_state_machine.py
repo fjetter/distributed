@@ -283,6 +283,7 @@ class TaskState:
     #: coroutine servicing this task completed; False otherwise. This flag changes
     #: the behaviour of transitions out of the ``executing``, ``flight`` etc. states.
     done: bool = False
+    required_transfer: bool = False
 
     _instances: ClassVar[weakref.WeakSet[TaskState]] = weakref.WeakSet()
 
@@ -448,6 +449,7 @@ class TaskFinishedMsg(SendMessageToScheduler):
     metadata: dict
     thread: int | None
     startstops: list[StartStop]
+    required_transfer: bool
     __slots__ = tuple(__annotations__)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1806,6 +1808,7 @@ class WorkerState:
             thread=self.threads.get(ts.key),
             startstops=ts.startstops,
             stimulus_id=stimulus_id,
+            required_transfer=ts.required_transfer,
         )
 
     ###############
@@ -1911,6 +1914,8 @@ class WorkerState:
 
         if not ts.waiting_for_data:
             recommendations[ts] = "ready"
+        else:
+            ts.required_transfer = True
 
         ts.state = "waiting"
         self.waiting.add(ts)
@@ -2257,6 +2262,13 @@ class WorkerState:
             )
 
         ts.state = "executing"
+        # if ts.key[0].startswith("random"):
+        #     if any(not ts.key[0].startswith("random") for ts in self.ready):
+        #         raise RuntimeError(f"""
+        #         Bad task priority encountered!
+        #         {(ts.key, ts.priority)}
+        #         {[(ts.key, ts.priority) for ts in self.ready.sorted()]}
+        #     """)
         instr = Execute(key=ts.key, stimulus_id=stimulus_id)
         return {}, [instr]
 
