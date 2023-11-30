@@ -192,7 +192,7 @@ DEFAULT_EXTENSIONS = {
 LATENCY_PENALTY = dask.config.get("distributed.scheduler.latency-penalty", 0.25)
 CONSIDER_HAS_WHAT = dask.config.get("distributed.scheduler.consider-has-what", False)
 
-INIT_TASK_BATCHSIZE: ContextVar[tuple[int, int]] = ContextVar(
+INIT_TASK_BATCHSIZE: ContextVar[tuple[int, int, int]] = ContextVar(
     "INIT_TASK_BATCHSIZE", default=(0, 0)
 )
 
@@ -1378,7 +1378,7 @@ class TaskState:
 
     #: Task annotations
     annotations: dict[str, Any]
-
+    group_priority: int
     #: The unique identifier of a specific execution of a task. This identifier
     #: is used to sign a task such that the assigned worker is expected to return
     #: the same identifier in the task-finished message. This is used to correlate
@@ -1442,6 +1442,7 @@ class TaskState:
         self.group = None  # type: ignore
         self.metadata = {}
         self.annotations = {}
+        self.group_priority = 0
         self.erred_on = set()
         self.run_id = None
         self.computed_on = None
@@ -1451,7 +1452,7 @@ class TaskState:
 
     @property
     def priority(self) -> tuple[int, int | float, int]:
-        return (self.user_priority, self.generation, self.internal_priority)
+        return (self.user_priority, self.generation, -self.group_priority, self.internal_priority)
 
     @property
     def priority_bias_corrected(self) -> tuple[int, int | float, int, int]:
@@ -2292,7 +2293,13 @@ class SchedulerState:
             import math
 
             tasks_per_worker = math.ceil(initial_batch_size / n_workers)
-            worker_ix = math.floor((self.n_tasks - ntasks_start) / tasks_per_worker)
+            # FIXME: This is the actual size of the connected group, not the number of root tasks in that group
+
+            tasks_per_worker = min(tasks_per_worker, len(ts.group))
+
+            tasks_per_micro_batch = min(20000000, tasks_per_worker)
+
+            worker_ix = ((self.n_tasks - ntasks_start) // tasks_per_micro_batch) % n_workers
             ws = wp_vals[worker_ix]
             if not ws.processing:
                 ws.priority_offset = ts.internal_priority
@@ -3129,10 +3136,9 @@ class SchedulerState:
             if ws in dts.who_has:
                 continue
             comm_bytes += dts.get_nbytes()
-            other_network_occ += sum(wws._network_occ for wws in dts.who_has) / len(
-                dts.who_has
-            )
-        other_network_occ = 0
+            # other_network_occ += sum(wws._network_occ for wws in dts.who_has) / len(
+            #     dts.who_has
+            # )
         # comm_bytes = sum(
         #     dts.get_nbytes()
         #     for dts in ts.dependencies
@@ -3314,43 +3320,43 @@ class SchedulerState:
         if ts.actor:
             ws.actors.add(ts)
 
-        ndep_bytes = sum(dts.nbytes for dts in ts.dependencies)
-        if (
-            ws.memory_limit
-            and ndep_bytes > ws.memory_limit
-            and dask.config.get("distributed.worker.memory.terminate")
-        ):
-            # Note
-            # ----
-            # This is a crude safety system, only meant to prevent order-of-magnitude
-            # fat-finger errors.
-            #
-            # For collection finalizers and in general most concat operations, it takes
-            # a lot less to kill off the worker; you'll just need
-            # ndep_bytes * 2 > ws.memory_limit * terminate threshold.
-            #
-            # In heterogeneous clusters with workers mounting different amounts of
-            # memory, the user is expected to manually set host/worker/resource
-            # restrictions.
-            msg = (
-                f"Task {ts.key!r} has {format_bytes(ndep_bytes)} worth of input "
-                f"dependencies, but worker {ws.address} has memory_limit set to "
-                f"{format_bytes(ws.memory_limit)}."
-            )
-            if ts.prefix.name == "finalize":
-                msg += (
-                    " It seems like you called client.compute() on a huge collection. "
-                    "Consider writing to distributed storage or slicing/reducing first."
-                )
-            logger.error(msg)
-            return self._transition(
-                ts.key,
-                "erred",
-                exception=pickle.dumps(MemoryError(msg)),
-                cause=ts.key,
-                stimulus_id=stimulus_id,
-                worker=ws.address,
-            )
+        # ndep_bytes = sum(dts.nbytes for dts in ts.dependencies)
+        # if (
+        #     ws.memory_limit
+        #     and ndep_bytes > ws.memory_limit
+        #     and dask.config.get("distributed.worker.memory.terminate")
+        # ):
+        #     # Note
+        #     # ----
+        #     # This is a crude safety system, only meant to prevent order-of-magnitude
+        #     # fat-finger errors.
+        #     #
+        #     # For collection finalizers and in general most concat operations, it takes
+        #     # a lot less to kill off the worker; you'll just need
+        #     # ndep_bytes * 2 > ws.memory_limit * terminate threshold.
+        #     #
+        #     # In heterogeneous clusters with workers mounting different amounts of
+        #     # memory, the user is expected to manually set host/worker/resource
+        #     # restrictions.
+        #     msg = (
+        #         f"Task {ts.key!r} has {format_bytes(ndep_bytes)} worth of input "
+        #         f"dependencies, but worker {ws.address} has memory_limit set to "
+        #         f"{format_bytes(ws.memory_limit)}."
+        #     )
+        #     if ts.prefix.name == "finalize":
+        #         msg += (
+        #             " It seems like you called client.compute() on a huge collection. "
+        #             "Consider writing to distributed storage or slicing/reducing first."
+        #         )
+        #     logger.error(msg)
+        #     return self._transition(
+        #         ts.key,
+        #         "erred",
+        #         exception=pickle.dumps(MemoryError(msg)),
+        #         cause=ts.key,
+        #         stimulus_id=stimulus_id,
+        #         worker=ws.address,
+        #     )
 
         return {}, {}, {ws.address: [self._task_to_msg(ts)]}
 
@@ -3527,7 +3533,7 @@ class SchedulerState:
             "op": "compute-task",
             "key": ts.key,
             "run_id": ts.run_id,
-            "priority": ts.priority_bias_corrected,
+            "priority": ts.priority,
             "duration": duration,
             "stimulus_id": f"compute-task-{time()}",
             "who_has": {
@@ -3856,6 +3862,7 @@ class Scheduler(SchedulerState, ServerNode):
             "reschedule": self._reschedule,
             "keep-alive": lambda *args, **kwargs: None,
             "log-event": self.log_worker_event,
+            "worker_throttled": self.stimulus_worker_throttled,
             "worker-status-change": self.handle_worker_status_change,
             "request-refresh-who-has": self.handle_request_refresh_who_has,
         }
@@ -4076,6 +4083,9 @@ class Scheduler(SchedulerState, ServerNode):
             "workers": worker_states,
             "versions": {"scheduler": self.versions(), "workers": worker_versions},
         }
+
+    def stimulus_worker_throttled(self, worker: str, stimulus_id) -> None:
+        self.stream_comms[worker].send({"op": "unthrottle", "stimulus_id": stimulus_id})
 
     async def dump_cluster_state_to_url(
         self,
@@ -4596,6 +4606,7 @@ class Scheduler(SchedulerState, ServerNode):
         dependencies: dict,
         keys: set[Key],
         ordered: dict[Key, int],
+        groups_priority: dict,
         client: str,
         annotations_by_type: dict,
         global_annotations: dict | None,
@@ -4659,6 +4670,7 @@ class Scheduler(SchedulerState, ServerNode):
 
         self._set_priorities(
             internal_priority=ordered,
+            groups_priority=groups_priority,
             submitting_task=submitting_task,
             user_priority=user_priority,
             fifo_timeout=fifo_timeout,
@@ -4783,7 +4795,6 @@ class Scheduler(SchedulerState, ServerNode):
                 graph=graph,
                 global_annotations=annotations or {},
             )
-            del graph
             if not internal_priority:
                 # Removing all non-local keys before calling order()
                 dsk_keys = set(
@@ -4794,9 +4805,38 @@ class Scheduler(SchedulerState, ServerNode):
                     for k, v in dependencies.items()
                     if k in dsk_keys
                 }
+
+                from dask.order import order
+                from collections import defaultdict
+                from distributed.utils import key_split_group
+                from dask.core import get_deps
+
+                groups_dependencies = defaultdict(set)
+
+                for key, deps in stripped_deps.items():
+                    # print(f"{key=}")
+                    # print(f"{deps=}")
+                    # print(f"{list(key_split_group(dts) for dts in deps)=}")
+                    groups_dependencies[key_split_group(key)].update({
+                        key_split_group(dts) for dts in deps
+                    })
+                def func():
+                    ...
+                groups_dsk = {
+                    k: (func, *deps)
+                    for k, deps in groups_dependencies.items()
+                }
+                self.dsk = dsk.copy()
+                self.groups_dependencies = groups_dependencies
+                self.groups_dsk = groups_dsk
+
+                groups_priority = await offload(
+                    dask.order.order, dsk=groups_dsk,
+                )
                 internal_priority = await offload(
                     dask.order.order, dsk=dsk, dependencies=stripped_deps
                 )
+            del graph
 
             self._create_taskstate_from_graph(
                 dsk=dsk,
@@ -4804,6 +4844,7 @@ class Scheduler(SchedulerState, ServerNode):
                 dependencies=dependencies,
                 keys=set(keys),
                 ordered=internal_priority or {},
+                groups_priority=groups_priority,
                 submitting_task=submitting_task,
                 user_priority=user_priority,
                 actors=actors,
@@ -4948,6 +4989,7 @@ class Scheduler(SchedulerState, ServerNode):
     def _set_priorities(
         self,
         internal_priority: dict[Key, int],
+        groups_priority,
         submitting_task: Key | None,
         user_priority: int | dict[Key, int],
         fifo_timeout: int | float | str,
@@ -4978,6 +5020,7 @@ class Scheduler(SchedulerState, ServerNode):
             # originate from a Layer annotation which takes precedence over the
             # global annotation.
             annotated_prio = ts.annotations.get("priority", task_user_prio)
+            ts.group_priority = groups_priority.get(ts.group.name, 0)
             ts.generation = generation
             ts.user_priority = -annotated_prio
             ts.internal_priority = internal_priority[ts.key]
@@ -5753,7 +5796,8 @@ class Scheduler(SchedulerState, ServerNode):
     ) -> None:
         if worker not in self.workers:
             return
-        self.validate_key(key)
+        if self.validate:
+            self.validate_key(key)
         ts = self.tasks[key]
         ts.required_transfer = msg.pop("required_transfer", False)
 

@@ -164,8 +164,9 @@ def get_local_address_for(addr: str) -> str:
     scheme, loc = parse_address(addr)
     backend = registry.get_backend(scheme)
     return unparse_address(scheme, backend.get_local_address_for(loc))
+from functools import lru_cache
 
-
+@lru_cache()
 def resolve_address(addr: str) -> str:
     """
     Apply scheme-specific address resolution to *addr*, replacing

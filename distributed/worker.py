@@ -133,6 +133,7 @@ from distributed.worker_state_machine import (
     ExecuteSuccessEvent,
     FindMissingEvent,
     FreeKeysEvent,
+    UnthrottleEvent,
     GatherDepBusyEvent,
     GatherDepFailureEvent,
     GatherDepNetworkFailureEvent,
@@ -715,6 +716,7 @@ class Worker(BaseWorker, ServerNode):
             "refresh-who-has": self._handle_remote_stimulus(RefreshWhoHasEvent),
             "worker-status-change": self.handle_worker_status_change,
             "remove-worker": self._handle_remove_worker,
+            "unthrottle": self._handle_remote_stimulus(UnthrottleEvent),
         }
 
         ServerNode.__init__(

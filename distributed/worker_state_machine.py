@@ -29,7 +29,7 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict, Union, cast
 
 from tlz import peekn
-
+from distributed.metrics import time
 import dask
 from dask.typing import Key
 from dask.utils import key_split, parse_bytes, typename
@@ -269,6 +269,7 @@ class TaskState:
     start_time: float | None = None
     #: Time at which task finishes running
     stop_time: float | None = None
+    skipped_in_ready: int = 0
     #: Metadata related to the task.
     #: Stored metadata should be msgpack serializable (e.g. int, string, list, dict).
     metadata: dict = field(default_factory=dict)
@@ -640,6 +641,25 @@ class UnpauseEvent(StateMachineEvent):
     __slots__ = ()
 
 
+class UnThrottleStimulus:
+    ...
+
+@dataclass
+class SendThrottleMsg(SendMessageToScheduler):
+    op = "worker_throttled"
+    __slots__ = ()
+
+
+@dataclass
+class ThrottleEvent(StateMachineEvent):
+    __slots__ = ()
+
+
+@dataclass
+class UnthrottleEvent(StateMachineEvent, UnThrottleStimulus):
+    __slots__ = ()
+
+
 @dataclass
 class RetryBusyWorkerEvent(StateMachineEvent):
     __slots__ = ("worker",)
@@ -736,8 +756,10 @@ class RemoveWorkerEvent(StateMachineEvent):
     __slots__ = ("worker",)
 
 
+
+
 @dataclass
-class ComputeTaskEvent(StateMachineEvent):
+class ComputeTaskEvent(StateMachineEvent, UnThrottleStimulus):
     key: Key
     run_id: int
     who_has: dict[Key, Collection[str]]
@@ -1257,12 +1279,12 @@ class WorkerState:
 
     #: Limit of bytes for incoming data transfers; this is used for throttling.
     transfer_incoming_bytes_limit: float
+    throttled: bool
+    bytes_generated : deque[float] | None
 
     #: Statically-seeded random state, used to guarantee determinism whenever a
     #: pseudo-random choice is required
     rng: random.Random
-
-    __slots__ = tuple(__annotations__)
 
     def __init__(
         self,
@@ -1280,7 +1302,8 @@ class WorkerState:
         transfer_message_bytes_limit: float = math.inf,
     ):
         self.nthreads = nthreads
-
+        self.throttled = None
+        self.bytes_generated = 0.0
         # address may not be known yet when the State Machine is initialised.
         # Raise AttributeError if a method tries reading it before it's been set.
         if address:
@@ -1327,6 +1350,9 @@ class WorkerState:
         self.transition_counter_max = transition_counter_max
         self.transfer_incoming_bytes_limit = transfer_incoming_bytes_limit
         self.actors = {}
+        self.last_stimulus_received = -1
+        self.executed_since_last_stim = 0
+        self.bytes_generated = deque(maxlen=10 * self.nthreads)
         self.rng = random.Random(0)
 
     def handle_stimulus(self, *stims: StateMachineEvent) -> Instructions:
@@ -1339,12 +1365,21 @@ class WorkerState:
         """
         instructions = []
         handled = time()
-        for stim in stims:
+        lstims = list(stims)
+        unthrottle = False
+        for stim in lstims:
+            if isinstance(stim, UnThrottleStimulus):
+                unthrottle = True
             if not isinstance(stim, FindMissingEvent):
                 self.stimulus_log.append(stim.to_loggable(handled=handled))
             recs, instr = self._handle_event(stim)
             instructions += instr
             instructions += self._transitions(recs, stimulus_id=stim.stimulus_id)
+        if unthrottle:
+            lstims.append(UnthrottleEvent(stimulus_id=stim.stimulus_id))
+            self.last_stimulus_received = time()
+            self.executed_since_last_stim = 0
+            self.bytes_generated.clear()
         return instructions
 
     #############
@@ -1534,7 +1569,7 @@ class WorkerState:
         """Transition tasks from fetch to flight, until there are no more tasks in fetch
         state or a threshold has been reached.
         """
-        if not self.running or not self.data_needed:
+        if not self.running or self.throttled is not None or not self.data_needed:
             return {}, []
         if self._should_throttle_incoming_transfers():
             return {}, []
@@ -1726,10 +1761,29 @@ class WorkerState:
         return ts.get_nbytes() > incoming_bytes_allowance
 
     def _ensure_computing(self) -> RecsInstrs:
-        if not self.running:
+        if not self.running or self.throttled is not None:
             return {}, []
-
+        instructions: list[Instruction] = []
         recs: Recs = {}
+        try:
+            tsr = self.ready.peek()
+        except KeyError:
+            return {}, []
+        # FIXME: This should be a heartbeat
+        if tsr and not tsr.dependencies and sum(self.bytes_generated) > 50 * 1024**2 or self.executed_since_last_stim > 10 or (
+            self.last_stimulus_received > 0
+            and time() - self.last_stimulus_received > 0.5
+        ):
+            self.throttled = f"throttle-{time()}"
+            logger.info(
+                "Throttling computation to avoid overloading %s tasks run since last message %s. byte growth %s",
+                self.executed_since_last_stim,
+                time() - self.last_stimulus_received,
+                sum(self.bytes_generated),
+            )
+            instructions.append(SendThrottleMsg(stimulus_id=self.throttled))
+            return recs, instructions
+
         while len(self.executing) < self.nthreads:
             ts = self._next_ready_task()
             if not ts:
@@ -1742,8 +1796,8 @@ class WorkerState:
             recs[ts] = "executing"
             self._acquire_resources(ts)
             self.executing.add(ts)
-
-        return recs, []
+            self.executed_since_last_stim += 1
+        return recs, instructions
 
     def _next_ready_task(self) -> TaskState | None:
         """Pop the top-priority task from self.ready or self.constrained"""
@@ -1773,6 +1827,9 @@ class WorkerState:
             elif tsr is not None:
                 return self.ready.pop()
         elif next_ts is tsr:
+            for t in self.ready:
+                if t is not next_ts:
+                    t.skipped_in_ready += 1
             # if "sub" in next_ts.key[0]:
             #     from .worker import print
             #     print(f"Executing {next_ts.key}")
@@ -1955,6 +2012,7 @@ class WorkerState:
     ) -> RecsInstrs:
         assert ts.nbytes is not None
         self.nbytes -= ts.nbytes
+        self.bytes_generated.append(-ts.nbytes)
         recs, instructions = self._transition_generic_released(
             ts, stimulus_id=stimulus_id
         )
@@ -2463,6 +2521,7 @@ class WorkerState:
         if ts.nbytes is None:
             ts.nbytes = sizeof(value)
         self.nbytes += ts.nbytes
+        self.bytes_generated.append(ts.nbytes)
         ts.type = type(value)
 
         for dep in ts.dependents:
@@ -3097,6 +3156,14 @@ class WorkerState:
             return {ts: "released"}, [smsg]
         else:
             return {}, [smsg]
+
+    @_handle_event.register
+    def _handle_unthrottle(self, ev: UnthrottleEvent) -> RecsInstrs:
+        """Emerge from throttled status"""
+        if self.throttled == ev.stimulus_id:
+            self.throttled = None
+            return self._ensure_computing()
+        return {}, []
 
     @_handle_event.register
     def _handle_pause(self, ev: PauseEvent) -> RecsInstrs:
