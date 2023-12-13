@@ -1452,7 +1452,12 @@ class TaskState:
 
     @property
     def priority(self) -> tuple[int, int | float, int]:
-        return (self.user_priority, self.generation, -self.group_priority, self.internal_priority)
+        return (
+            self.user_priority,
+            self.generation,
+            -self.group_priority,
+            self.internal_priority,
+        )
 
     @property
     def priority_bias_corrected(self) -> tuple[int, int | float, int, int]:
@@ -2299,7 +2304,9 @@ class SchedulerState:
 
             tasks_per_micro_batch = min(20000000, tasks_per_worker)
 
-            worker_ix = ((self.n_tasks - ntasks_start) // tasks_per_micro_batch) % n_workers
+            worker_ix = (
+                (self.n_tasks - ntasks_start) // tasks_per_micro_batch
+            ) % n_workers
             ws = wp_vals[worker_ix]
             if not ws.processing:
                 ws.priority_offset = ts.internal_priority
@@ -2935,8 +2942,8 @@ class SchedulerState:
         Root-ish tasks are part of a group that's much larger than the cluster,
         and have few or no dependencies.
         """
-        if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
-            return False
+        # if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
+        return False
         tg = ts.group
         # TODO short-circuit to True if `not ts.dependencies`?
         return (
@@ -4806,10 +4813,12 @@ class Scheduler(SchedulerState, ServerNode):
                     if k in dsk_keys
                 }
 
-                from dask.order import order
                 from collections import defaultdict
-                from distributed.utils import key_split_group
+
                 from dask.core import get_deps
+                from dask.order import order
+
+                from distributed.utils import key_split_group
 
                 groups_dependencies = defaultdict(set)
 
@@ -4817,21 +4826,23 @@ class Scheduler(SchedulerState, ServerNode):
                     # print(f"{key=}")
                     # print(f"{deps=}")
                     # print(f"{list(key_split_group(dts) for dts in deps)=}")
-                    groups_dependencies[key_split_group(key)].update({
-                        key_split_group(dts) for dts in deps
-                    })
+                    groups_dependencies[key_split_group(key)].update(
+                        {key_split_group(dts) for dts in deps}
+                    )
+
                 def func():
                     ...
+
                 groups_dsk = {
-                    k: (func, *deps)
-                    for k, deps in groups_dependencies.items()
+                    k: (func, *deps) for k, deps in groups_dependencies.items()
                 }
                 self.dsk = dsk.copy()
                 self.groups_dependencies = groups_dependencies
                 self.groups_dsk = groups_dsk
 
                 groups_priority = await offload(
-                    dask.order.order, dsk=groups_dsk,
+                    dask.order.order,
+                    dsk=groups_dsk,
                 )
                 internal_priority = await offload(
                     dask.order.order, dsk=dsk, dependencies=stripped_deps
