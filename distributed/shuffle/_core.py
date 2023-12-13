@@ -7,7 +7,7 @@ import itertools
 import pickle
 import time
 from collections import defaultdict
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import Enum
@@ -40,7 +40,6 @@ if TYPE_CHECKING:
     _P = ParamSpec("_P")
 
     # circular dependencies
-    from distributed.shuffle._scheduler_plugin import ShuffleSchedulerPlugin
     from distributed.shuffle._worker_plugin import ShuffleWorkerPlugin
 
 ShuffleId = NewType("ShuffleId", str)
@@ -69,6 +68,10 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
     _exception: Exception | None
     _closed_event: asyncio.Event
     _loop: IOLoop
+
+    RETRY_COUNT: int
+    RETRY_DELAY_MIN: float
+    RETRY_DELAY_MAX: float
 
     def __init__(
         self,
@@ -115,6 +118,14 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
         self._closed_event = asyncio.Event()
         self._loop = loop
 
+        self.RETRY_COUNT = dask.config.get("distributed.p2p.comm.retry.count")
+        self.RETRY_DELAY_MIN = parse_timedelta(
+            dask.config.get("distributed.p2p.comm.retry.delay.min"), default="s"
+        )
+        self.RETRY_DELAY_MAX = parse_timedelta(
+            dask.config.get("distributed.p2p.comm.retry.delay.max"), default="s"
+        )
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}: id={self.id!r}, run_id={self.run_id!r}, local_address={self.local_address!r}, closed={self.closed!r}, transferred={self.transferred!r}>"
 
@@ -154,14 +165,6 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
     async def send(
         self, address: str, shards: list[tuple[_T_partition_id, Any]]
     ) -> None:
-        retry_count = dask.config.get("distributed.p2p.comm.retry.count")
-        retry_delay_min = parse_timedelta(
-            dask.config.get("distributed.p2p.comm.retry.delay.min"), default="s"
-        )
-        retry_delay_max = parse_timedelta(
-            dask.config.get("distributed.p2p.comm.retry.delay.max"), default="s"
-        )
-
         if _mean_shard_size(shards) < 65536:
             # Don't send buffers individually over the tcp comms.
             # Instead, merge everything into an opaque bytes blob, send it all at once,
@@ -174,9 +177,9 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
 
         return await retry(
             partial(self._send, address, shards_or_bytes),
-            count=retry_count,
-            delay_min=retry_delay_min,
-            delay_max=retry_delay_max,
+            count=self.RETRY_COUNT,
+            delay_min=self.RETRY_DELAY_MIN,
+            delay_max=self.RETRY_DELAY_MAX,
         )
 
     async def offload(
@@ -258,7 +261,7 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
             data = cast(list[tuple[_T_partition_id, Any]], pickle.loads(data))
         await self._receive(data)
 
-    async def _ensure_output_worker(self, i: _T_partition_id, key: str) -> None:
+    async def _ensure_output_worker(self, i: _T_partition_id, key: Key) -> None:
         assigned_worker = self._get_assigned_worker(i)
 
         if assigned_worker != self.local_address:
@@ -295,7 +298,7 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
         """Shard an input partition by the assigned output workers"""
 
     def get_output_partition(
-        self, partition_id: _T_partition_id, key: str, **kwargs: Any
+        self, partition_id: _T_partition_id, key: Key, **kwargs: Any
     ) -> _T_partition_type:
         self.raise_if_closed()
         sync(self._loop, self._ensure_output_worker, partition_id, key)
@@ -306,7 +309,7 @@ class ShuffleRun(Generic[_T_partition_id, _T_partition_type]):
 
     @abc.abstractmethod
     def _get_output_partition(
-        self, partition_id: _T_partition_id, key: str, **kwargs: Any
+        self, partition_id: _T_partition_id, key: Key, **kwargs: Any
     ) -> _T_partition_type:
         """Get an output partition to the shuffle run"""
 
@@ -357,7 +360,7 @@ class ShuffleType(Enum):
 
 @dataclass(frozen=True)
 class ShuffleRunSpec(Generic[_T_partition_id]):
-    run_id: int = field(init=False, default_factory=partial(next, itertools.count(1)))  # type: ignore
+    run_id: int = field(init=False, default_factory=partial(next, itertools.count(1)))
     spec: ShuffleSpec
     worker_for: dict[_T_partition_id, str]
 
@@ -371,21 +374,23 @@ class ShuffleSpec(abc.ABC, Generic[_T_partition_id]):
     id: ShuffleId
     disk: bool
 
+    @abc.abstractproperty
+    def output_partitions(self) -> Generator[_T_partition_id, None, None]:
+        """Output partitions"""
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    def pick_worker(self, partition: _T_partition_id, workers: Sequence[str]) -> str:
+        """Pick a worker for a partition"""
+
     def create_new_run(
         self,
-        plugin: ShuffleSchedulerPlugin,
+        worker_for: dict[_T_partition_id, str],
     ) -> SchedulerShuffleState:
-        worker_for = self._pin_output_workers(plugin)
         return SchedulerShuffleState(
             run_spec=ShuffleRunSpec(spec=self, worker_for=worker_for),
             participating_workers=set(worker_for.values()),
         )
-
-    @abc.abstractmethod
-    def _pin_output_workers(
-        self, plugin: ShuffleSchedulerPlugin
-    ) -> dict[_T_partition_id, str]:
-        """Pin output tasks to workers and return the mapping of partition ID to worker."""
 
     @abc.abstractmethod
     def create_run_on_worker(

@@ -130,16 +130,6 @@ properties:
 
               If we don't receive a heartbeat faster than this then we assume that the worker has died.
 
-          pickle:
-            type: boolean
-            description: |
-              Is the scheduler allowed to deserialize arbitrary bytestrings?
-
-              The scheduler almost never deserializes user data.
-              However there are some cases where the user can submit functions to run directly on the scheduler.
-              This can be convenient for debugging, but also introduces some security risk.
-              By setting this to false we ensure that the user is unable to run arbitrary code on the scheduler.
-
           preload:
             type: array
             description: |
@@ -969,13 +959,6 @@ properties:
 
                   For a full list of supported UCX environment
                   variables, run ``ucx_info -f``.
-          tcp:
-            type: object
-            properties:
-              backend:
-                type: string
-                description: |
-                  The TCP backend implementation to use. Must be either `tornado` or `asyncio`.
 
           websockets:
             type: object
@@ -1068,7 +1051,7 @@ properties:
                         description: The maximum delay between retries
           disk:
             type: boolean
-            description: | 
+            description: |
               Whether or not P2P stores intermediate data on disk instead of memory
 
       dashboard:

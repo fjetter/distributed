@@ -3,10 +3,16 @@ from __future__ import annotations
 import logging
 import os
 from collections import defaultdict
-from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Generator,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -41,7 +47,6 @@ from distributed.shuffle._core import (
     handle_unpack_errors,
 )
 from distributed.shuffle._limiter import ResourceLimiter
-from distributed.shuffle._scheduler_plugin import ShuffleSchedulerPlugin
 from distributed.shuffle._worker_plugin import ShuffleWorkerPlugin
 from distributed.sizeof import sizeof
 
@@ -306,8 +311,6 @@ def split_by_worker(
 
     from dask.dataframe.dispatch import to_pyarrow_table_dispatch
 
-    df = df.astype(meta.dtypes, copy=False)
-
     # (cudf support) Avoid pd.Series
     constructor = df._constructor_sliced
     assert isinstance(constructor, type)
@@ -500,7 +503,7 @@ class DataFrameShuffleRun(ShuffleRun[int, "pd.DataFrame"]):
     def _get_output_partition(
         self,
         partition_id: int,
-        key: str,
+        key: Key,
         **kwargs: Any,
     ) -> pd.DataFrame:
         try:
@@ -526,9 +529,12 @@ class DataFrameShuffleSpec(ShuffleSpec[int]):
     meta: pd.DataFrame
     parts_out: set[int]
 
-    def _pin_output_workers(self, plugin: ShuffleSchedulerPlugin) -> dict[int, str]:
-        pick_worker = partial(_get_worker_for_range_sharding, self.npartitions)
-        return plugin._pin_output_workers(self.id, self.parts_out, pick_worker)
+    @property
+    def output_partitions(self) -> Generator[int, None, None]:
+        yield from self.parts_out
+
+    def pick_worker(self, partition: int, workers: Sequence[str]) -> str:
+        return _get_worker_for_range_sharding(self.npartitions, partition, workers)
 
     def create_run_on_worker(
         self, run_id: int, worker_for: dict[int, str], plugin: ShuffleWorkerPlugin

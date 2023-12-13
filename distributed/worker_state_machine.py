@@ -29,7 +29,7 @@ from itertools import chain
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypedDict, Union, cast
 
 from tlz import peekn
-from distributed.metrics import time
+
 import dask
 from dask.typing import Key
 from dask.utils import key_split, parse_bytes, typename
@@ -644,6 +644,7 @@ class UnpauseEvent(StateMachineEvent):
 class UnThrottleStimulus:
     ...
 
+
 @dataclass
 class SendThrottleMsg(SendMessageToScheduler):
     op = "worker_throttled"
@@ -754,8 +755,6 @@ class GatherDepFailureEvent(GatherDepDoneEvent):
 class RemoveWorkerEvent(StateMachineEvent):
     worker: str
     __slots__ = ("worker",)
-
-
 
 
 @dataclass
@@ -1280,7 +1279,7 @@ class WorkerState:
     #: Limit of bytes for incoming data transfers; this is used for throttling.
     transfer_incoming_bytes_limit: float
     throttled: bool
-    bytes_generated : deque[float] | None
+    bytes_generated: deque[float] | None
 
     #: Statically-seeded random state, used to guarantee determinism whenever a
     #: pseudo-random choice is required
@@ -1770,9 +1769,15 @@ class WorkerState:
         except KeyError:
             return {}, []
         # FIXME: This should be a heartbeat
-        if tsr and not tsr.dependencies and sum(self.bytes_generated) > 50 * 1024**2 or self.executed_since_last_stim > 10 or (
-            self.last_stimulus_received > 0
-            and time() - self.last_stimulus_received > 0.5
+        if (
+            tsr
+            and not tsr.dependencies
+            and sum(self.bytes_generated) > 50 * 1024**2
+            or self.executed_since_last_stim > 10
+            or (
+                self.last_stimulus_received > 0
+                and time() - self.last_stimulus_received > 0.5
+            )
         ):
             self.throttled = f"throttle-{time()}"
             logger.info(
@@ -2733,18 +2738,22 @@ class WorkerState:
         return recs, instructions
 
     def _resource_restrictions_satisfied(self, ts: TaskState) -> bool:
+        if not ts.resource_restrictions:
+            return True
         return all(
             self.available_resources[resource] >= needed
             for resource, needed in ts.resource_restrictions.items()
         )
 
     def _acquire_resources(self, ts: TaskState) -> None:
-        for resource, needed in ts.resource_restrictions.items():
-            self.available_resources[resource] -= needed
+        if ts.resource_restrictions:
+            for resource, needed in ts.resource_restrictions.items():
+                self.available_resources[resource] -= needed
 
     def _release_resources(self, ts: TaskState) -> None:
-        for resource, needed in ts.resource_restrictions.items():
-            self.available_resources[resource] += needed
+        if ts.resource_restrictions:
+            for resource, needed in ts.resource_restrictions.items():
+                self.available_resources[resource] += needed
 
     def _transitions(self, recommendations: Recs, *, stimulus_id: str) -> Instructions:
         """Process transitions until none are left
@@ -3663,9 +3672,10 @@ class WorkerState:
             assert v > -1e-9, self.available_resources
             total[k] -= v
         for ts in self.all_running_tasks:
-            for k, v in ts.resource_restrictions.items():
-                assert v >= 0, (ts, ts.resource_restrictions)
-                total[k] -= v
+            if ts.resource_restrictions:
+                for k, v in ts.resource_restrictions.items():
+                    assert v >= 0, (ts, ts.resource_restrictions)
+                    total[k] -= v
 
         assert all((abs(v) < 1e-9) for v in total.values()), total
 
