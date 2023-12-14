@@ -2955,8 +2955,8 @@ class SchedulerState:
         Root-ish tasks are part of a group that's much larger than the cluster,
         and have few or no dependencies.
         """
-        if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
-            return False
+        # if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
+        return False
         tg = ts.group
         # TODO short-circuit to True if `not ts.dependencies`?
         return (
