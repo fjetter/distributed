@@ -1780,7 +1780,7 @@ class WorkerState:
             )
         ):
             self.throttled = f"throttle-{time()}"
-            logger.info(
+            logger.debug(
                 "Throttling computation to avoid overloading %s tasks run since last message %s. byte growth %s",
                 self.executed_since_last_stim,
                 time() - self.last_stimulus_received,

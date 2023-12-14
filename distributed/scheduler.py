@@ -32,7 +32,7 @@ from collections.abc import (
 from contextlib import suppress
 from contextvars import ContextVar
 from functools import partial
-from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, cast, overload
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, NamedTuple, Sequence, cast, overload
 
 import psutil
 import tornado.web
@@ -1383,7 +1383,6 @@ class TaskState:
 
     #: Task annotations
     annotations: dict[str, Any] | None
-    group_priority: int
     #: The unique identifier of a specific execution of a task. This identifier
     #: is used to sign a task such that the assigned worker is expected to return
     #: the same identifier in the task-finished message. This is used to correlate
@@ -1452,7 +1451,6 @@ class TaskState:
         self.group = None  # type: ignore
         self.metadata = None
         self.annotations = None
-        self.group_priority = 0
         self.erred_on = None
         self.run_id = None
         self.computed_on = None
@@ -1465,7 +1463,6 @@ class TaskState:
         return (
             self.user_priority,
             self.generation,
-            -self.group_priority,
             self.internal_priority,
         )
 
@@ -2314,13 +2311,11 @@ class SchedulerState:
             tasks_per_worker = math.ceil(initial_batch_size / n_workers)
             # FIXME: This is the actual size of the connected group, not the number of root tasks in that group
 
-            tasks_per_worker = min(tasks_per_worker, len(ts.group))
+            # tasks_per_worker = min(tasks_per_worker, len(ts.group))
 
-            tasks_per_micro_batch = min(20000000, tasks_per_worker)
+            # tasks_per_micro_batch = min(20000000, tasks_per_worker)
 
-            worker_ix = (
-                (self.n_tasks - ntasks_start) // tasks_per_micro_batch
-            ) % n_workers
+            worker_ix = ((self.n_tasks - ntasks_start) // tasks_per_worker) % n_workers
             ws = wp_vals[worker_ix]
             if not ws.processing:
                 ws.priority_offset = ts.internal_priority
@@ -2960,8 +2955,8 @@ class SchedulerState:
         Root-ish tasks are part of a group that's much larger than the cluster,
         and have few or no dependencies.
         """
-        # if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
-        return False
+        if ts.resource_restrictions or ts.worker_restrictions or ts.host_restrictions:
+            return False
         tg = ts.group
         # TODO short-circuit to True if `not ts.dependencies`?
         return (
@@ -4647,7 +4642,6 @@ class Scheduler(SchedulerState, ServerNode):
         dependencies: dict,
         keys: set[Key],
         ordered: dict[Key, int],
-        groups_priority: dict,
         client: str,
         annotations_by_type: dict,
         global_annotations: dict | None,
@@ -4711,7 +4705,6 @@ class Scheduler(SchedulerState, ServerNode):
 
         self._set_priorities(
             internal_priority=ordered,
-            groups_priority=groups_priority,
             submitting_task=submitting_task,
             user_priority=user_priority,
             fifo_timeout=fifo_timeout,
@@ -4848,37 +4841,6 @@ class Scheduler(SchedulerState, ServerNode):
                     if k in dsk_keys
                 }
 
-                from collections import defaultdict
-
-                from dask.core import get_deps
-                from dask.order import order
-
-                from distributed.utils import key_split_group
-
-                groups_dependencies = defaultdict(set)
-
-                for key, deps in stripped_deps.items():
-                    # print(f"{key=}")
-                    # print(f"{deps=}")
-                    # print(f"{list(key_split_group(dts) for dts in deps)=}")
-                    groups_dependencies[key_split_group(key)].update(
-                        {key_split_group(dts) for dts in deps}
-                    )
-
-                def func():
-                    ...
-
-                groups_dsk = {
-                    k: (func, *deps) for k, deps in groups_dependencies.items()
-                }
-                self.dsk = dsk.copy()
-                self.groups_dependencies = groups_dependencies
-                self.groups_dsk = groups_dsk
-
-                groups_priority = await offload(
-                    dask.order.order,
-                    dsk=groups_dsk,
-                )
                 internal_priority = await offload(
                     dask.order.order, dsk=dsk, dependencies=stripped_deps
                 )
@@ -4890,7 +4852,6 @@ class Scheduler(SchedulerState, ServerNode):
                 dependencies=dependencies,
                 keys=set(keys),
                 ordered=internal_priority or {},
-                groups_priority=groups_priority,
                 submitting_task=submitting_task,
                 user_priority=user_priority,
                 actors=actors,
@@ -5035,7 +4996,6 @@ class Scheduler(SchedulerState, ServerNode):
     def _set_priorities(
         self,
         internal_priority: dict[Key, int],
-        groups_priority,
         submitting_task: Key | None,
         user_priority: int | dict[Key, int],
         fifo_timeout: int | float | str,
@@ -5069,7 +5029,6 @@ class Scheduler(SchedulerState, ServerNode):
                 annotated_prio = ts.annotations.get("priority", task_user_prio)
             else:
                 annotated_prio = task_user_prio
-            ts.group_priority = groups_priority.get(ts.group.name, 0)
             ts.generation = generation
             ts.user_priority = -annotated_prio
             ts.internal_priority = internal_priority[ts.key]
@@ -8532,15 +8491,18 @@ def decide_worker(
     *objective* function.
     """
     assert all_workers
-    assert all(dts.who_has for dts in ts.dependencies)
-    candidates = set(all_workers)
-    if valid_workers is not None and not valid_workers:
-        if ts.loose_restrictions:
-            return decide_worker(ts, all_workers, None, objective)
-        else:
-            return None
 
-    elif len(candidates) == 1:
+    if valid_workers is not None:
+        if not valid_workers:
+            if ts.loose_restrictions:
+                return decide_worker(ts, all_workers, None, objective)
+            else:
+                return None
+        candidates = valid_workers
+    else:
+        candidates = set(all_workers)
+
+    if len(candidates) == 1:
         return next(iter(candidates))
     else:
         return min(candidates, key=objective)
