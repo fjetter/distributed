@@ -32,11 +32,10 @@ from packaging.version import parse as parse_version
 from tlz import first, groupby, merge, partition_all, valmap
 
 import dask
-from dask.base import collections_to_dsk, tokenize
+from dask.base import collections_to_graphfactory, tokenize
 from dask.core import flatten, validate_key
-from dask.highlevelgraph import HighLevelGraph
 from dask.optimization import SubgraphCallable
-from dask.typing import NoDefault, no_default
+from dask.typing import NoDefault, ensure_graph_factory, no_default
 from dask.utils import (
     apply,
     ensure_dict,
@@ -3116,10 +3115,6 @@ class Client(SyncMethodMixin):
             if actors is not None and actors is not True and actors is not False:
                 actors = list(self._expand_key(actors))
 
-            # Make sure `dsk` is a high level graph
-            if not isinstance(dsk, HighLevelGraph):
-                dsk = HighLevelGraph.from_collections(id(dsk), dsk, dependencies=())
-
             annotations = {}
             if user_priority:
                 annotations["priority"] = user_priority
@@ -3256,9 +3251,10 @@ class Client(SyncMethodMixin):
         --------
         Client.compute : Compute asynchronous collections
         """
+        dsk = ensure_graph_factory(dsk, keys)
         futures = self._graph_to_futures(
             dsk,
-            keys=set(flatten([keys])),
+            keys=list(flatten([keys])),
             workers=workers,
             allow_other_workers=allow_other_workers,
             resources=resources,
@@ -3374,7 +3370,9 @@ class Client(SyncMethodMixin):
         sync : bool (optional)
             Returns Futures if False (default) or concrete values if True
         optimize_graph : bool
-            Whether or not to optimize the underlying graphs
+            Whether or not to optimize the underlying graphs.
+
+            Note: with the usage of `dask-expr` backed collections, this is ignored.
         workers : string or iterable of strings
             A set of worker hostnames on which computations may be performed.
             Leave empty to default to all workers (common case)
@@ -3431,61 +3429,46 @@ class Client(SyncMethodMixin):
         --------
         Client.get : Normal synchronous dask.get function
         """
-        if isinstance(collections, (list, tuple, set, frozenset)):
+        arguments = collections
+        del collections
+        if isinstance(arguments, (list, tuple, set, frozenset)):
             singleton = False
         else:
-            collections = [collections]
+            arguments = [arguments]
             singleton = True
 
         if traverse:
-            collections = tuple(
+            arguments = tuple(
                 (
                     dask.delayed(a)
                     if isinstance(a, (list, set, tuple, dict, Iterator))
                     else a
                 )
-                for a in collections
+                for a in arguments
             )
+        collections = [a for a in arguments if dask.is_dask_collection(a)]
+        if collections:
+            dsk = collections_to_graphfactory(
+                collections, precompute=True, optimize_graph=optimize_graph
+            )
+            combined_opt = dsk.optimize()
 
-        variables = [a for a in collections if dask.is_dask_collection(a)]
-
-        dsk = self.collections_to_dsk(variables, optimize_graph, **kwargs)
-        names = ["finalize-%s" % tokenize(v) for v in variables]
-        dsk2 = {}
-        for i, (name, v) in enumerate(zip(names, variables)):
-            func, extra_args = v.__dask_postcompute__()
-            keys = v.__dask_keys__()
-            if func is single_key and len(keys) == 1 and not extra_args:
-                names[i] = keys[0]
-            else:
-                dsk2[name] = (func, keys) + extra_args
-
-        if not isinstance(dsk, HighLevelGraph):
-            dsk = HighLevelGraph.from_collections(id(dsk), dsk, dependencies=())
-
-        # Let's append the finalize graph to dsk
-        finalize_name = tokenize(names)
-        layers = {finalize_name: dsk2}
-        layers.update(dsk.layers)
-        dependencies = {finalize_name: set(dsk.layers.keys())}
-        dependencies.update(dsk.dependencies)
-        dsk = HighLevelGraph(layers, dependencies)
-
-        futures_dict = self._graph_to_futures(
-            dsk,
-            names,
-            workers=workers,
-            allow_other_workers=allow_other_workers,
-            resources=resources,
-            retries=retries,
-            user_priority=priority,
-            fifo_timeout=fifo_timeout,
-            actors=actors,
-        )
+            names = list(flatten(combined_opt.__dask_keys__()))
+            futures_dict = self._graph_to_futures(
+                combined_opt,
+                names,
+                workers=workers,
+                allow_other_workers=allow_other_workers,
+                resources=resources,
+                retries=retries,
+                user_priority=priority,
+                fifo_timeout=fifo_timeout,
+                actors=actors,
+            )
 
         i = 0
         futures = []
-        for arg in collections:
+        for arg in arguments:
             if dask.is_dask_collection(arg):
                 futures.append(futures_dict[names[i]])
                 i += 1
@@ -3573,13 +3556,14 @@ class Client(SyncMethodMixin):
 
         assert all(map(dask.is_dask_collection, collections))
 
-        dsk = self.collections_to_dsk(collections, optimize_graph, **kwargs)
-
-        names = {k for c in collections for k in flatten(c.__dask_keys__())}
+        dsk = collections_to_graphfactory(
+            collections, precompute=False, optimize_graph=optimize_graph
+        )
+        combined_opt = dsk.optimize()
 
         futures = self._graph_to_futures(
-            dsk,
-            names,
+            combined_opt,
+            list(flatten(combined_opt.__dask_keys__())),
             workers=workers,
             allow_other_workers=allow_other_workers,
             resources=resources,
@@ -3588,13 +3572,14 @@ class Client(SyncMethodMixin):
             fifo_timeout=fifo_timeout,
             actors=actors,
         )
-
-        postpersists = [c.__dask_postpersist__() for c in collections]
-        result = [
-            func({k: futures[k] for k in flatten(c.__dask_keys__())}, *args)
-            for (func, args), c in zip(postpersists, collections)
-        ]
-
+        result = []
+        for collection in collections:
+            func, args = collection.__dask_postpersist__()
+            result.append(
+                func(
+                    {k: futures[k] for k in flatten(collection.__dask_keys__())}, *args
+                )
+            )
         if singleton:
             return first(result)
         else:
@@ -4703,11 +4688,6 @@ class Client(SyncMethodMixin):
                 yield from kk.__dask_keys__()
             else:
                 yield kk
-
-    @staticmethod
-    def collections_to_dsk(collections, *args, **kwargs):
-        """Convert many collections into a single dask graph, after optimization"""
-        return collections_to_dsk(collections, *args, **kwargs)
 
     async def _story(self, *keys_or_stimuli: str, on_error="raise"):
         assert on_error in ("raise", "ignore")

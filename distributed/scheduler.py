@@ -55,7 +55,7 @@ import dask
 import dask.utils
 from dask.base import TokenizationError, normalize_token, tokenize
 from dask.core import get_deps, iskey, validate_key
-from dask.typing import Key, no_default
+from dask.typing import GraphFactory, Key, no_default
 from dask.utils import (
     ensure_dict,
     format_bytes,
@@ -142,8 +142,6 @@ if TYPE_CHECKING:
     # TODO import from typing (requires Python >=3.10)
     # TODO import from typing (requires Python >=3.11)
     from typing_extensions import Self, TypeAlias
-
-    from dask.highlevelgraph import HighLevelGraph
 
 # Not to be confused with distributed.worker_state_machine.TaskStateState
 TaskStateState: TypeAlias = Literal[
@@ -4666,7 +4664,7 @@ class Scheduler(SchedulerState, ServerNode):
         client: str,
         graph_header: dict,
         graph_frames: list[bytes],
-        keys: set[Key],
+        keys: list[Key],
         internal_priority: dict[Key, int] | None,
         submitting_task: Key | None,
         user_priority: int | dict[Key, int] = 0,
@@ -4696,6 +4694,7 @@ class Scheduler(SchedulerState, ServerNode):
             ) = await offload(
                 _materialize_graph,
                 graph=graph,
+                keys=keys,
                 global_annotations=annotations or {},
             )
             del graph
@@ -8979,24 +8978,32 @@ class CollectTaskMetaDataPlugin(SchedulerPlugin):
 
 
 def _materialize_graph(
-    graph: HighLevelGraph, global_annotations: dict[str, Any]
+    graph: GraphFactory | dict, keys: list[Key], global_annotations: dict[str, Any]
 ) -> tuple[dict[Key, T_runspec], dict[Key, set[Key]], dict[str, dict[Key, Any]]]:
-    dsk = ensure_dict(graph)
+    if isinstance(graph, dict):
+        # TODO: Check if this is still happening. Even dicts should've become a
+        # factory at this point
+        dsk = graph.copy()
+        graph_annotations = {}
+    else:
+        dsk = ensure_dict(graph.__dask_graph__())
+        graph_annotations = graph.__dask_annotations__()
+        # Task names with dask-expr rely on tokenization which is known to be
+        # unreliable across interpreters. If we encounter this situation, just
+        # create aliases to the correct keys.
+        for actual, expected in zip(graph.__dask_keys__(), keys):
+            if expected not in dsk:
+                dsk[expected] = actual
+
     for k in dsk:
         validate_key(k)
+
     annotations_by_type: defaultdict[str, dict[Key, Any]] = defaultdict(dict)
     for annotations_type, value in global_annotations.items():
         annotations_by_type[annotations_type].update(
             {k: (value(k) if callable(value) else value) for k in dsk}
         )
-
-    for layer in graph.layers.values():
-        if layer.annotations:
-            annot = layer.annotations
-            for annot_type, value in annot.items():
-                annotations_by_type[annot_type].update(
-                    {k: (value(k) if callable(value) else value) for k in layer}
-                )
+    annotations_by_type.update(graph_annotations)
     dependencies, _ = get_deps(dsk)
 
     # Remove `Future` objects from graph and note any future dependencies

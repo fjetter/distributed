@@ -1022,7 +1022,7 @@ async def test_blocklist_shuffle_split(c, s, a, b):
             "A",
             # If we don't have enough partitions, we'll fall back to a simple shuffle
             max_branch=npart - 1,
-        ).sum()
+        ).map_partitions(lambda x: x)
     res = c.compute(graph)
 
     while not s.tasks:

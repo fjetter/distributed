@@ -2766,7 +2766,7 @@ async def test_default_task_duration_splits(c, s, a, b):
             "A",
             # If we don't have enough partitions, we'll fall back to a simple shuffle
             max_branch=npart - 1,
-        ).sum()
+        ).map_partitions(lambda x: x)
     fut = c.compute(graph)
     await wait(fut)
 

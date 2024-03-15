@@ -54,7 +54,8 @@ async def test_dataframes(c, s, a, b):
     assert rdf.divisions == ldf.divisions
 
     remote = c.compute(rdf)
-    result = await remote
+    # TODO: What the...?
+    result = remote
 
     assert_frame_equal(result, ldf.compute(scheduler="sync"))
 
@@ -200,12 +201,12 @@ def test_dataframe_groupby_tasks(client):
         a = df.groupby(ind(df)).apply(len, **INCLUDE_GROUPS)
         b = ddf.groupby(ind(ddf)).apply(len, meta=(None, int), **INCLUDE_GROUPS)
         assert_equal(a, b.compute().sort_index())
-        assert not any("partd" in k[0] for k in b.dask)
+        assert not any("partd" in k[0] for k in b.__dask_graph__())
 
         a = df.groupby(ind(df)).B.apply(len, **INCLUDE_GROUPS)
         b = ddf.groupby(ind(ddf)).B.apply(len, meta=("B", int), **INCLUDE_GROUPS)
         assert_equal(a, b.compute().sort_index())
-        assert not any("partd" in k[0] for k in b.dask)
+        assert not any("partd" in k[0] for k in b.__dask_graph__())
 
     with pytest.raises((NotImplementedError, ValueError)):
         ddf.groupby(ddf[["A", "B"]]).apply(len, meta=int, **INCLUDE_GROUPS)
