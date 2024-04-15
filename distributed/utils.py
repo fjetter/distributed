@@ -1951,14 +1951,26 @@ class RateLimiterFilter(logging.Filter):
 
 if sys.version_info >= (3, 11):
 
-    async def wait_for(fut: Awaitable[T], timeout: float) -> T:
+    async def wait_for(fut: Awaitable[T], timeout: float | None) -> T:
         async with asyncio.timeout(timeout):
             return await fut
 
 else:
 
-    async def wait_for(fut: Awaitable[T], timeout: float) -> T:
-        return await asyncio.wait_for(fut, timeout)
+    async def wait_for(fut: Awaitable[T], timeout: float | None) -> T:
+        if timeout is None:
+            return await fut
+        fut = asyncio.ensure_future(fut)
+        timeout_task = asyncio.ensure_future(asyncio.sleep(timeout))
+        for t in asyncio.as_completed([fut, timeout_task]):
+            res = await t
+            if t is timeout_task:
+                fut.cancel()
+                raise asyncio.TimeoutError
+            else:
+                timeout_task.cancel()
+            break
+        return res  # type: ignore
 
 
 class TupleComparable:
