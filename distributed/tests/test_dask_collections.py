@@ -50,12 +50,10 @@ async def test_dataframes(c, s, a, b):
     )
     ldf = dd.from_pandas(df, npartitions=10)
 
-    rdf = await c.persist(ldf)
+    rdf = c.persist(ldf)
     assert rdf.divisions == ldf.divisions
 
-    remote = c.compute(rdf)
-    # TODO: What the...?
-    result = remote
+    result = await c.compute(rdf)
 
     assert_frame_equal(result, ldf.compute(scheduler="sync"))
 
