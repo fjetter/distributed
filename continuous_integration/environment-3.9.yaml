@@ -52,7 +52,7 @@ dependencies:
   - zict
   - zstandard
   - pip:
-      - git+https://github.com/dask/dask
-      - git+https://github.com/dask-contrib/dask-expr
+      - git+https://github.com/fjetter/dask@expr_to_scheduler_v2
+      - git+https://github.com/fjetter/dask-expr@expr_to_scheduler_v2
       - git+https://github.com/dask/crick  # Only tested here
       - keras
