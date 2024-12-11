@@ -70,8 +70,8 @@ def dumps(  # type: ignore[no-untyped-def]
             )
             return [sub_header] + sub_frames
 
-        def create_pickled_sub_frames(obj: Pickled | ToPickle) -> list:
-            if isinstance(obj, Pickled):
+        def create_pickled_sub_frames(obj: Pickled | Serialized | ToPickle | Serialize ) -> list:
+            if isinstance(obj, (Pickled, Serialized)):
                 sub_header, sub_frames = obj.header, obj.frames
             else:
                 sub_frames = []
@@ -94,11 +94,7 @@ def dumps(  # type: ignore[no-untyped-def]
         frames = [None]
 
         def _encode_default(obj):
-            if isinstance(obj, (Serialize, Serialized)):
-                offset = len(frames)
-                frames.extend(create_serialized_sub_frames(obj))
-                return {"__Serialized__": offset}
-            elif isinstance(obj, (ToPickle, Pickled)):
+            if isinstance(obj, (Serialize, Serialized, ToPickle, Pickled)):
                 offset = len(frames)
                 frames.extend(create_pickled_sub_frames(obj))
                 return {"__Pickled__": offset}

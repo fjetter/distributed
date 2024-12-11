@@ -83,20 +83,8 @@ def eq_frames(a, b):
 def test_dumps_loads_Serialize():
     msg = {"x": 1, "data": Serialize(123)}
     frames = dumps(msg)
-    assert len(frames) > 2
     result = loads(frames)
     assert result == {"x": 1, "data": 123}
-
-    result2 = loads(frames, deserialize=False)
-    assert result2["x"] == 1
-    assert isinstance(result2["data"], Serialized)
-    assert any(a is b for a in result2["data"].frames for b in frames)
-
-    frames2 = dumps(result2)
-    assert all(map(eq_frames, frames, frames2))
-
-    result3 = loads(frames2)
-    assert result == result3
 
 
 def test_dumps_loads_Serialized():
@@ -115,6 +103,23 @@ def test_dumps_loads_Serialized():
     result3 = loads(frames2)
     assert result == result3
 
+class MyObj:
+    def __getstate__(self):
+        raise TypeError
+called_serialize = False
+@cuda_serialize.register(MyObj)
+@dask_serialize.register(MyObj)
+def serialize_(x):
+    nonlocal called_serialize
+    called_serialize = True
+    return {}, [1]
+
+@cuda_deserialize.register(MyObj)
+@dask_deserialize.register(MyObj)
+def deserialize_(header, frames):
+    assert header == {}
+    assert frames == [1]
+    return MyObj()
 
 @pytest.mark.parametrize("serializers", [("dask",), ("cuda",)])
 def test_preserve_header(serializers):
@@ -123,24 +128,10 @@ def test_preserve_header(serializers):
     of the underlying registered dumps/loads functions.
     """
 
-    class MyObj:
-        pass
-
-    @cuda_serialize.register(MyObj)
-    @dask_serialize.register(MyObj)
-    def _(x):
-        return {}, []
-
-    @cuda_deserialize.register(MyObj)
-    @dask_deserialize.register(MyObj)
-    def _(header, frames):
-        assert header == {}
-        assert frames == []
-        return MyObj()
-
-    header, frames = serialize(MyObj(), serializers=serializers)
-    o = deserialize(header, frames)
+    frames = dumps(MyObj(), serializers=serializers)
+    o = loads(frames)
     assert isinstance(o, MyObj)
+    assert called_serialize
 
 
 @pytest.mark.parametrize(

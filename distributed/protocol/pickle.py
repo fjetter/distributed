@@ -15,17 +15,33 @@ logger = logging.getLogger(__name__)
 
 
 class _DaskPickler(pickle.Pickler):
-    def reducer_override(self, obj):
-        # For some objects this causes segfaults otherwise, see
-        # https://github.com/dask/distributed/pull/7564#issuecomment-1438727339
+    dispatch_table = {}
+
+    def reducer_override(self, obj: inspect.Any) -> inspect.Any:
         if _always_use_pickle_for(obj):
             return NotImplemented
+        if type(obj) not in self.dispatch_table:
+            func = _DaskPickler.add_reducer_from_dispatch(type(obj))
+            if func:
+                return func(obj)
+        return NotImplemented
+
+    @classmethod
+    def add_reducer_from_dispatch(cls, typ):
         try:
-            serialize = dask_serialize.dispatch(type(obj))
-            deserialize = dask_deserialize.dispatch(type(obj))
-            return deserialize, serialize(obj)
-        except TypeError:
-            return NotImplemented
+            dask_deserialize.dispatch(typ)
+            dask_serialize.dispatch(typ)
+            def _(obj):
+                # TODO: the deserialization has to be global scope using this.
+                # That's not ideal. We should be able to construct something
+                # that doesn't have this requirement. That's a trade off. HAving
+                # the deserializer encoder here already would be nice to avoid
+                # anothe rdispatch
+                return dask_deserialize.dispatch(typ), dask_serialize.dispatch(typ)(obj)
+            cls.dispatch_table[typ] = _
+            return _
+        except:
+            return None
 
 
 def _always_use_pickle_for(x):
@@ -56,14 +72,11 @@ def dumps(x, *, buffer_callback=None, protocol=HIGHEST_PROTOCOL):
     if dump_kwargs["protocol"] >= 5 and buffer_callback is not None:
         dump_kwargs["buffer_callback"] = buffers.append
     try:
-        try:
-            result = pickle.dumps(x, **dump_kwargs)
-        except Exception:
-            f = io.BytesIO()
-            pickler = _DaskPickler(f, **dump_kwargs)
-            buffers.clear()
-            pickler.dump(x)
-            result = f.getvalue()
+        f = io.BytesIO()
+        pickler = _DaskPickler(f, **dump_kwargs)
+        buffers.clear()
+        pickler.dump(x)
+        result = f.getvalue()
         if b"__main__" in result or (
             getattr(inspect.getmodule(x), "__name__", None)
             in cloudpickle.list_registry_pickle_by_value()
@@ -72,6 +85,7 @@ def dumps(x, *, buffer_callback=None, protocol=HIGHEST_PROTOCOL):
                 buffers.clear()
                 result = cloudpickle.dumps(x, **dump_kwargs)
     except Exception:
+        import sys
         try:
             buffers.clear()
             result = cloudpickle.dumps(x, **dump_kwargs)

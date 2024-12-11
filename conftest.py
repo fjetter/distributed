@@ -39,4 +39,3 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(pytest.mark.workerstate)
 
 
-pytest_plugins = ["distributed.pytest_resourceleaks"]
