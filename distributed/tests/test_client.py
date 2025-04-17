@@ -7303,6 +7303,7 @@ def test_upload_directory_invalid_mode():
         UploadDirectory(".", mode="invalid")
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(WINDOWS, reason="distributed#7434")
 @pytest.mark.parametrize("mode", ["all", "scheduler"])
 @gen_test()
@@ -7325,10 +7326,13 @@ async def test_upload_directory_to_scheduler(mode, tmp_path):
     async with SubprocessCluster(
         asynchronous=True,
         dashboard_address=":0",
+        n_workers=1 if mode == "all" else 0,
         scheduler_kwargs={"idle_timeout": "5s"},
         worker_kwargs={"death_timeout": "5s"},
     ) as cluster:
         async with Client(cluster, asynchronous=True) as client:
+            if mode == "all":
+                await client.wait_for_workers(1)
             with pytest.raises(ModuleNotFoundError, match="'bar'"):
                 res = await client.run_on_scheduler(f)
 
@@ -7336,6 +7340,9 @@ async def test_upload_directory_to_scheduler(mode, tmp_path):
                 tmp_path, mode=mode, restart_workers=True, update_path=True
             )
             await client.register_plugin(plugin)
+            if mode == "all":
+                res = await client.run(f)
+                assert set(res.values()) == {123}
             assert await client.run_on_scheduler(f) == 123
 
 
