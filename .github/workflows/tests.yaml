@@ -229,7 +229,7 @@ jobs:
           set -o pipefail
           mkdir reports
 
-          python -m pytest distributed.tests.test_tls_functional.py \
+          python -m pytest distributed/tests/test_tls_functional.py \
             -m "not avoid_ci" --runslow \
             --leaks=fds,processes,threads \
             --junitxml reports/pytest.xml -o junit_suite_name=$TEST_ID \
