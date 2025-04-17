@@ -790,20 +790,17 @@ async def start_cluster(
 
     await asyncio.gather(*workers)
 
-    start = time()
-    while (
-        len(s.workers) < len(nthreads)
-        or any(ws.status != Status.running for ws in s.workers.values())
-        or any(comm.comm is None for comm in s.stream_comms.values())
-    ):
-        await asyncio.sleep(0.01)
-        if time() > start + 30:
-            await asyncio.gather(*(w.close(timeout=1) for w in workers))
-            await s.close()
-            check_invalid_worker_transitions(s)
-            check_invalid_task_states(s)
-            check_worker_fail_hard(s)
-            raise TimeoutError("Cluster creation timeout")
+    try:
+        assert len(s.running) == len(nthreads)
+    except Exception as exc:
+        close_everything = [s.close()]
+        close_everything.extend(w.close(timeout=1) for w in workers)
+        await asyncio.gather(*close_everything)
+        check_invalid_worker_transitions(s)
+        check_invalid_task_states(s)
+        check_worker_fail_hard(s)
+        raise TimeoutError("Cluster creation timeout") from exc
+
     return s, workers
 
 
@@ -1568,10 +1565,7 @@ def bump_rlimit(limit, desired):
 
 
 def gen_tls_cluster(**kwargs):
-    kwargs.setdefault("nthreads", [("tls://127.0.0.1", 1), ("tls://127.0.0.1", 2)])
-    return gen_cluster(
-        scheduler="tls://127.0.0.1", security=tls_only_security(), **kwargs
-    )
+    return gen_cluster(security=tls_only_security(), **kwargs)
 
 
 @contextmanager
