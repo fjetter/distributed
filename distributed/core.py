@@ -893,6 +893,7 @@ class Server:
                     logger.info(
                         "Connection to %s has been closed.",
                         comm.peer_address,
+                        exc_info=True,
                     )
                     break
                 if not isinstance(msgs, (tuple, list)):

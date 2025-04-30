@@ -232,6 +232,7 @@ class TCP(Comm):
                 frames.append(buffer)
 
         except (StreamClosedError, SSLError) as e:
+            logger.error("Stream closed during read")
             self.stream = None
             self._closed = True
             convert_stream_closed_error(self, e)
